@@ -8,6 +8,7 @@ use crate::{
     shelf::{Shelf, VISIBLE},
     media::{Art, Media},
     render::{Align, Canvas},
+    text::tr,
 };
 
 pub const TEXT: u32 = 0xFFF2F2F7;
@@ -16,10 +17,13 @@ const FAINT: u32 = 0x33FFFFFF;
 const DISABLED: u32 = 0xFF48484A;
 
 /// One page under the tab bar.
-pub const PAGE: (f32, f32) = (380.0, 130.0);
+/// One page under the tab bar; its bottom row keeps clear of the island's rounded corners.
+pub const PAGE: (f32, f32) = (380.0, 144.0);
 
 // Music page.
 pub const ART: (f32, f32, f32) = (18.0, 6.0, 56.0); // x, y, size
+/// The art's corners, as round as the tab highlight's.
+pub const ART_RADIUS: f32 = 12.0;
 /// The art is decoded and drawn once at this size; every place that shows it scales it.
 pub const ART_SOURCE: f32 = 80.0;
 pub const BAR: (f32, f32, f32, f32) = (18.0, 76.0, 344.0, 4.0);
@@ -38,21 +42,35 @@ pub const SHUFFLE: char = '\u{E8B1}';
 pub const REPEAT_ALL: char = '\u{E8EE}';
 pub const REPEAT_ONE: char = '\u{E8ED}';
 const NOTE: char = '\u{E8D6}';
+/// The like button, right of the title, level with the art; its color when the song is liked.
+pub const HEART: (f32, f32, f32) = (PAGE.0 - 18.0 - 30.0, ART.1 + (ART.2 - 30.0) / 2.0, 30.0);
+pub const LIKED: u32 = 0xFFFF375F;
+/// The player line under the artist: "Brave", or "Brave · 1/2 ›" when more players have
+/// something on; a click there moves to the next one.
+pub const PLAYER_LINE: (f32, f32, f32, f32) = (ART.0 + ART.2 + 12.0, ART.1 + 37.0, HEART.0 - 6.0 - (ART.0 + ART.2 + 12.0), 20.0);
+/// Art, title and artist: a click brings the player (in a browser, its tab) to the front.
+pub const NOW_PLAYING: (f32, f32, f32, f32) = (ART.0, ART.1, HEART.0 - 6.0 - ART.0, ART.2);
 
 /// Title, artist, player and the progress track. The moving parts (art, progress fill,
 /// times, buttons) are separate visuals.
 pub fn music_page(c: &Canvas, media: Option<&Media>) -> Result<()> {
     let Some(m) = media else {
         // Art and buttons are hidden then, so the message has the whole page.
-        c.text("Çalan bir şey yok", (18.0, 38.0, PAGE.0 - 36.0, 24.0), 13.5, true, DIM, Align::Center)?;
-        return c.text("Spotify, tarayıcı ya da başka bir oynatıcıda müzik başlatın", (18.0, 62.0, PAGE.0 - 36.0, 20.0), 11.5, false, 0xFF636366, Align::Center);
+        c.text(tr("Çalan bir şey yok", "Nothing playing"), (18.0, 38.0, PAGE.0 - 36.0, 24.0), 13.5, true, DIM, Align::Center)?;
+        let hint = tr("Spotify, tarayıcı ya da başka bir oynatıcıda müzik başlatın", "Start music in Spotify, a browser or another player");
+        return c.text(hint, (18.0, 62.0, PAGE.0 - 36.0, 20.0), 11.5, false, 0xFF636366, Align::Center);
     };
     let x = ART.0 + ART.2 + 12.0;
-    let w = PAGE.0 - x - 18.0;
-    let title = if m.title.is_empty() { "Bilinmeyen parça" } else { &m.title };
+    let w = HEART.0 - 6.0 - x;
+    let title = if m.title.is_empty() { tr("Bilinmeyen parça", "Unknown track") } else { &m.title };
     c.text(title, (x, ART.1, w, 22.0), 14.0, true, TEXT, Align::Left)?;
     c.text(&m.artist, (x, ART.1 + 21.0, w, 18.0), 12.5, false, DIM, Align::Left)?;
-    c.text(&m.app, (x, ART.1 + 39.0, w, 16.0), 11.0, false, 0xFF636366, Align::Left)?;
+    if m.sessions > 1 {
+        let players = format!("{} · {}/{}  ›", m.app, m.index + 1, m.sessions);
+        c.text(&players, (x, ART.1 + 39.0, w, 16.0), 11.0, true, DIM, Align::Left)?;
+    } else {
+        c.text(&m.app, (x, ART.1 + 39.0, w, 16.0), 11.0, false, 0xFF636366, Align::Left)?;
+    }
     if m.duration > 0.0 {
         c.round_rect(BAR, BAR.3 / 2.0, FAINT)?;
     }
@@ -67,9 +85,41 @@ pub fn times(c: &Canvas, media: Option<&Media>, now_ms: u64) -> Result<()> {
     c.text(&format!("-{}", clock(m.duration - at)), bounds, 10.5, false, DIM, Align::Right)
 }
 
+/// The heart: filled when the song is liked, an outline otherwise.
+pub fn heart(c: &Canvas, liked: bool) -> Result<()> {
+    let bounds = (0.0, 0.0, HEART.2, HEART.2);
+    if liked {
+        c.icon('\u{EB52}', bounds, 17.0, LIKED) // HeartFill
+    } else {
+        c.icon('\u{EB51}', bounds, 17.0, DIM) // Heart
+    }
+}
+
+/// Previous, play, pause or next, drawn like Apple's filled symbols: rounded triangles and
+/// bars, centered in the BUTTON square.
 pub fn button(c: &Canvas, glyph: char, enabled: bool) -> Result<()> {
-    let size = if glyph == PLAY || glyph == PAUSE { 20.0 } else { 15.0 };
-    c.icon(glyph, (0.0, 0.0, BUTTON, BUTTON), size, if enabled { TEXT } else { DISABLED })
+    let color = if enabled { TEXT } else { DISABLED };
+    let m = BUTTON / 2.0;
+    // One triangle pointing right (or left), `w` wide and `h` tall, its tip at `tip`.
+    let triangle = |tip: f32, w: f32, h: f32, round: f32| c.polygon(&[(tip - w, m - h / 2.0), (tip, m), (tip - w, m + h / 2.0)], round, color);
+    match glyph {
+        // Its weight sits right of its middle, so the tip goes a little past it.
+        PLAY => triangle(m + 9.0, 13.5, 15.0, 3.0),
+        PAUSE => {
+            c.round_rect((m - 6.5, m - 8.0, 4.5, 16.0), 1.6, color)?;
+            c.round_rect((m + 2.0, m - 8.0, 4.5, 16.0), 1.6, color)
+        }
+        NEXT => {
+            triangle(m, 8.0, 11.0, 2.2)?;
+            triangle(m + 8.0, 8.0, 11.0, 2.2)
+        }
+        PREVIOUS => {
+            let back = |tip: f32| c.polygon(&[(tip + 8.0, m - 5.5), (tip, m), (tip + 8.0, m + 5.5)], 2.2, color);
+            back(m)?;
+            back(m - 8.0)
+        }
+        _ => c.icon(glyph, (0.0, 0.0, BUTTON, BUTTON), 15.0, color),
+    }
 }
 
 // Shelf page: two lists (files dropped here, new screenshots) picked with the segments on
@@ -84,7 +134,7 @@ pub const SEGMENTS: [(f32, f32, f32, f32); 2] = [(14.0, 0.0, 96.0, 22.0), (114.0
 /// "Tümünü seç", top right.
 pub const SELECT_ALL: (f32, f32, f32, f32) = (PAGE.0 - 112.0, 0.0, 98.0, 22.0);
 /// "Temizle" (or "Kaldır" for a selection), bottom right.
-pub const SHELF_CLEAR: (f32, f32, f32, f32) = (PAGE.0 - 90.0, PAGE.1 - 24.0, 76.0, 22.0);
+pub const SHELF_CLEAR: (f32, f32, f32, f32) = (PAGE.0 - 90.0, PAGE.1 - 34.0, 76.0, 22.0);
 
 /// Where tile `slot` of `shown` on screen sits: a row centered on the page.
 pub fn shelf_tile(slot: usize, shown: usize) -> (f32, f32, f32, f32) {
@@ -95,7 +145,7 @@ pub fn shelf_tile(slot: usize, shown: usize) -> (f32, f32, f32, f32) {
 /// The shelf page showing `list` (0 files, 1 screenshots); `counts` are both lists' sizes.
 /// `dropping` while files are dragged over the island.
 pub fn shelf_page(c: &Canvas, shelf: &Shelf, list: usize, counts: [usize; 2], dropping: bool) -> Result<()> {
-    for (i, (label, count)) in [("Dosyalar", counts[0]), ("Ekran görüntüleri", counts[1])].into_iter().enumerate() {
+    for (i, (label, count)) in [(tr("Dosyalar", "Files"), counts[0]), (tr("Ekran görüntüleri", "Screenshots"), counts[1])].into_iter().enumerate() {
         let bounds = SEGMENTS[i];
         if i == list {
             c.round_rect(bounds, bounds.3 / 2.0, FAINT)?;
@@ -104,13 +154,17 @@ pub fn shelf_page(c: &Canvas, shelf: &Shelf, list: usize, counts: [usize; 2], dr
         c.text(&text, bounds, 11.5, true, if i == list { TEXT } else { DIM }, Align::Center)?;
     }
     if dropping {
-        c.outline((10.0, ROW_Y - 4.0, PAGE.0 - 20.0, PAGE.1 - ROW_Y), 14.0, 1.5, DROP, true)?;
+        c.outline((10.0, ROW_Y - 4.0, PAGE.0 - 20.0, PAGE.1 - 10.0 - (ROW_Y - 4.0)), 22.0, 1.5, DROP, true)?;
     }
     if shelf.items.is_empty() {
         let (glyph, title, hint) = match (list, dropping) {
-            (1, false) => ('\u{E722}', "Ekran görüntüsü yok", "Bundan sonra aldığınız ekran görüntüleri burada görünür"),
-            (_, true) => ('\u{E896}', "Bırakın", "Rafta beklerler; sonra istediğiniz yere sürükleyin"),
-            _ => ('\u{E896}', "Dosyaları buraya sürükleyin", "Rafta beklerler; sonra istediğiniz yere sürükleyin"),
+            (1, false) => (
+                '\u{E722}',
+                tr("Ekran görüntüsü yok", "No screenshots"),
+                tr("Bundan sonra aldığınız ekran görüntüleri burada görünür", "Screenshots you take from now on show up here"),
+            ),
+            (_, true) => ('\u{E896}', tr("Bırakın", "Drop them"), tr("Rafta beklerler; sonra istediğiniz yere sürükleyin", "They wait on the shelf; drag them anywhere later")),
+            _ => ('\u{E896}', tr("Dosyaları buraya sürükleyin", "Drag files here"), tr("Rafta beklerler; sonra istediğiniz yere sürükleyin", "They wait on the shelf; drag them anywhere later")),
         };
         c.icon(glyph, (0.0, ROW_Y + 6.0, PAGE.0, 30.0), 22.0, if dropping { DROP } else { DIM })?; // Camera / Download
         c.text(title, (18.0, ROW_Y + 40.0, PAGE.0 - 36.0, 22.0), 13.5, true, if dropping { TEXT } else { DIM }, Align::Center)?;
@@ -137,25 +191,26 @@ pub fn shelf_page(c: &Canvas, shelf: &Shelf, list: usize, counts: [usize; 2], dr
     }
     let (selected, total) = (shelf.selected(), shelf.items.len());
     let status = if selected > 0 {
-        format!("{selected} seçili · sürükleyip bırakın")
+        tr(format!("{selected} seçili · sürükleyip bırakın"), format!("{selected} selected · drag them out"))
     } else if total > VISIBLE {
-        format!("{}–{} / {total} · tekerlekle kaydırın", shelf.offset + 1, shelf.offset + shown)
+        let (first, last) = (shelf.offset + 1, shelf.offset + shown);
+        tr(format!("{first}–{last} / {total} · tekerlekle kaydırın"), format!("{first}–{last} of {total} · scroll with the wheel"))
     } else {
-        "Tıkla: seç · Çift tıkla: aç · Sürükle: bırak".to_string()
+        tr("Tıkla: seç · Çift tıkla: aç · Sürükle: bırak", "Click: select · Double-click: open · Drag: drop").to_string()
     };
     c.text(&status, (18.0, SHELF_CLEAR.1, 268.0, SHELF_CLEAR.3), 11.0, false, 0xFF636366, Align::Left)?;
-    c.text(if selected == total { "Seçimi kaldır" } else { "Tümünü seç" }, SELECT_ALL, 11.5, true, DIM, Align::Right)?;
-    c.text(if selected > 0 { "Kaldır" } else { "Temizle" }, SHELF_CLEAR, 11.5, true, DIM, Align::Right)
+    c.text(if selected == total { tr("Seçimi kaldır", "Deselect all") } else { tr("Tümünü seç", "Select all") }, SELECT_ALL, 11.5, true, DIM, Align::Right)?;
+    c.text(if selected > 0 { tr("Kaldır", "Remove") } else { tr("Temizle", "Clear") }, SHELF_CLEAR, 11.5, true, DIM, Align::Right)
 }
 
 /// The closed island's two lines: a bold title and a dim line under it, `w` wide.
 pub fn two_lines(c: &Canvas, title: &str, detail: &str, w: f32, h: f32) -> Result<()> {
     if detail.is_empty() {
-        return c.text(title, (0.0, 0.0, w, h), 12.5, true, TEXT, Align::Left);
+        return c.text(title, (0.0, 0.0, w, h), 13.0, true, TEXT, Align::Left);
     }
-    let top = h / 2.0 - 14.5;
-    c.text(title, (0.0, top, w, 16.5), 12.0, true, TEXT, Align::Left)?;
-    c.text(detail, (0.0, top + 15.5, w, 13.5), 10.0, false, DIM, Align::Left)
+    let top = h / 2.0 - 15.5;
+    c.text(title, (0.0, top, w, 17.5), 12.5, true, TEXT, Align::Left)?;
+    c.text(detail, (0.0, top + 17.0, w, 14.0), 10.5, false, DIM, Align::Left)
 }
 
 /// Diameter of the 5-hour limit ring.
@@ -185,6 +240,40 @@ pub fn volume(c: &Canvas, (w, h): (f32, f32), level: u32, muted: bool) -> Result
         c.round_rect((bar.0, bar.1, (bar.2 * level.min(100) as f32 / 100.0).max(bar.3), bar.3), 2.0, color)?;
     }
     c.text(&level.to_string(), (w - 46.0, 0.0, 30.0, h), 12.5, true, color, Align::Right)
+}
+
+/// Side of a notification's icon, decoded at this size.
+pub const NOTICE_ICON: f32 = 38.0;
+/// The disc under it, centered in the notification's round end, so the two curves share a center.
+pub const NOTICE_DISC: f32 = 48.0;
+
+/// The sender's icon on its disc, `NOTICE_DISC` square; a bell when the sender has no icon.
+pub fn notice_icon(c: &Canvas, icon: Option<&Art>) -> Result<()> {
+    let m = NOTICE_DISC / 2.0;
+    c.circle((m, m), m, 0xFF2C2C2E)?;
+    let bounds = (m - NOTICE_ICON / 2.0, m - NOTICE_ICON / 2.0, NOTICE_ICON, NOTICE_ICON);
+    match icon {
+        Some(art) => c.image(&art.pixels, art.size, bounds),
+        None => c.icon('\u{EA8F}', bounds, 20.0, TEXT), // Ringer
+    }
+}
+
+/// A notification's words in a `(w, h)` pill, right of its icon: the sender, the title, a
+/// line of the text.
+pub fn notice(c: &Canvas, (w, h): (f32, f32), notice: &crate::notices::Notice) -> Result<()> {
+    let x = h + 4.0;
+    let text_w = w - x - h / 2.0;
+    let rows: Vec<(&str, f32, bool, u32)> = [(notice.app.as_str(), 11.0, false, DIM), (notice.title.as_str(), 13.0, true, TEXT), (notice.body.as_str(), 11.5, false, DIM)]
+        .into_iter()
+        .filter(|row| !row.0.trim().is_empty())
+        .collect();
+    let row_h = 17.0;
+    let mut y = (h - rows.len() as f32 * row_h) / 2.0;
+    for (text, size, bold, color) in rows {
+        c.text(text, (x, y, text_w, row_h), size, bold, color, Align::Left)?;
+        y += row_h;
+    }
+    Ok(())
 }
 
 /// Shuffle or repeat: bright with a dot under it when on, dim when off.
@@ -219,11 +308,11 @@ pub fn claude_page(c: &Canvas, sessions: &[Session], limits: &Limits, now: u64) 
     const X: f32 = 18.0;
     const RIGHT: f32 = PAGE.0 - 18.0;
     if limits.five_hour.is_none() && limits.seven_day.is_none() {
-        c.text("Limit bilgisi yok", (X, 0.0, 200.0, 18.0), 12.0, true, TEXT, Align::Left)?;
-        c.text("Claude Code'da oturum açılınca gelir", (X, 18.0, RIGHT - X, 18.0), 11.5, false, DIM, Align::Left)?;
+        c.text(tr("Limit bilgisi yok", "No limit data"), (X, 0.0, 200.0, 18.0), 12.0, true, TEXT, Align::Left)?;
+        c.text(tr("Claude Code'da oturum açılınca gelir", "Shows up once you sign in to Claude Code"), (X, 18.0, RIGHT - X, 18.0), 11.5, false, DIM, Align::Left)?;
     } else {
         // Label, bar filled by what is used, "%23 kullanıldı", time to the reset.
-        for (row, (label, window)) in [("5 saat", limits.five_hour), ("Haftalık", limits.seven_day)].into_iter().enumerate() {
+        for (row, (label, window)) in [(tr("5 saat", "5 hours"), limits.five_hour), (tr("Haftalık", "Weekly"), limits.seven_day)].into_iter().enumerate() {
             let y = row as f32 * 20.0;
             let limit = limit_text(window, limits.updated, now);
             c.text(label, (X, y, 56.0, 18.0), 12.0, true, TEXT, Align::Left)?;
@@ -242,7 +331,7 @@ pub fn claude_page(c: &Canvas, sessions: &[Session], limits: &Limits, now: u64) 
     }
 
     if sessions.is_empty() {
-        return c.text("Açık Claude oturumu yok", (X, SESSIONS_Y, RIGHT - X, ROW_H), 12.5, false, DIM, Align::Left);
+        return c.text(tr("Açık Claude oturumu yok", "No open Claude sessions"), (X, SESSIONS_Y, RIGHT - X, ROW_H), 12.5, false, DIM, Align::Left);
     }
     let rows = session_rows(sessions);
     for (i, session) in rows.iter().enumerate() {
@@ -254,7 +343,8 @@ pub fn claude_page(c: &Canvas, sessions: &[Session], limits: &Limits, now: u64) 
     }
     if sessions.len() > rows.len() {
         let y = SESSIONS_Y + rows.len() as f32 * ROW_H;
-        c.text(&format!("+{} oturum daha", sessions.len() - rows.len()), (X + 14.0, y, 200.0, ROW_H), 12.0, false, DIM, Align::Left)?;
+        let more = sessions.len() - rows.len();
+        c.text(&tr(format!("+{more} oturum daha"), format!("+{more} more")), (X + 14.0, y, 200.0, ROW_H), 12.0, false, DIM, Align::Left)?;
     }
     Ok(())
 }
@@ -290,28 +380,28 @@ pub struct LimitText {
 }
 
 pub fn limit_text(window: Option<Window>, updated: u64, now: u64) -> LimitText {
-    let Some(w) = window else { return LimitText { used: 0.0, used_text: "bilgi yok".into(), when: String::new(), renews: false } };
+    let Some(w) = window else { return LimitText { used: 0.0, used_text: tr("bilgi yok", "no data").into(), when: String::new(), renews: false } };
     if now >= w.resets_at {
-        return LimitText { used: 0.0, used_text: "%0 kullanıldı".into(), when: "sıfırlandı".into(), renews: false };
+        return LimitText { used: 0.0, used_text: tr("%0 kullanıldı", "0% used").into(), when: tr("sıfırlandı", "reset").into(), renews: false };
     }
     let used = w.used_percentage.clamp(0.0, 100.0);
     let age = now.saturating_sub(updated);
     // Figures older than half an hour say so instead of a countdown that may be stale.
     let (when, renews) = if age > 30 * 60 {
-        (format!("{} önce", duration_text(age)), false)
+        (tr(format!("{} önce", duration_text(age)), format!("{} ago", duration_text(age))), false)
     } else {
         (duration_text(w.resets_at - now), true)
     };
-    LimitText { used: (used / 100.0) as f32, used_text: format!("%{used:.0} kullanıldı"), when, renews }
+    LimitText { used: (used / 100.0) as f32, used_text: tr(format!("%{used:.0} kullanıldı"), format!("{used:.0}% used")), when, renews }
 }
 
 fn duration_text(seconds: u64) -> String {
     let minutes = seconds / 60;
     match (minutes / (24 * 60), minutes / 60 % 24, minutes % 60) {
-        (0, 0, 0) => "1 dk".into(),
-        (0, 0, m) => format!("{m} dk"),
-        (0, h, m) => format!("{h} sa {m} dk"),
-        (d, h, _) => format!("{d} g {h} sa"),
+        (0, 0, 0) => tr("1 dk", "1 min").into(),
+        (0, 0, m) => tr(format!("{m} dk"), format!("{m} min")),
+        (0, h, m) => tr(format!("{h} sa {m} dk"), format!("{h} h {m} min")),
+        (d, h, _) => tr(format!("{d} g {h} sa"), format!("{d} d {h} h")),
     }
 }
 
@@ -366,6 +456,11 @@ mod tests {
         let stale = limit_text(Some(w), 0, 3_000); // figures 50 minutes old
         assert_eq!((stale.when.as_str(), stale.renews), ("50 dk önce", false));
         assert_eq!(limit_text(None, 0, 0).used_text, "bilgi yok");
+        crate::text::set(crate::text::Language::English);
+        assert_eq!(duration_text(2 * 3600 + 13 * 60), "2 h 13 min");
+        let fresh = limit_text(Some(w), 1_000, 1_000 + 60);
+        assert_eq!((fresh.used_text.as_str(), fresh.when.as_str()), ("42% used", "2 h 29 min"));
+        assert_eq!(limit_text(Some(w), 0, 3_000).when, "50 min ago");
     }
 
     #[test]

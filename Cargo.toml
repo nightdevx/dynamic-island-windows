@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 windows-numerics = "0.3" # Vector2/Vector3 used by the windows crate's composition APIs
 windows-core = "0.62"    # named by the code `#[implement]` generates (COM callbacks)
+windows-collections = "0.3" # a WinRT list of names for the blur effect; already part of `windows`
 
 [dependencies.windows]
 version = "0.62"
@@ -21,21 +22,28 @@ features = [
     "Foundation_Numerics",
     "Graphics",
     "Graphics_DirectX",
+    "Graphics_Effects",
+    "ApplicationModel",
+    "Foundation_Collections",
     "Media_Control",
     "Storage_Streams",
     "System",
     "UI",
     "UI_Composition",
     "UI_Composition_Desktop",
+    "UI_Notifications",
+    "UI_Notifications_Management",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Globalization",
     "Win32_Graphics_Imaging",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
@@ -56,6 +64,7 @@ features = [
     "Win32_System_Variant",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
     "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",

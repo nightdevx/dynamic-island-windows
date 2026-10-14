@@ -1,16 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod blur;
 mod claude;
 mod fullscreen;
 mod island;
 mod json;
+mod liked;
 mod media;
+mod notices;
 mod pages;
+mod player;
+mod preferences;
 mod privacy;
 mod render;
 mod settings;
 mod shelf;
+mod text;
 mod usage;
 mod window;
 
@@ -31,7 +37,10 @@ fn main() {
     // Short-lived modes started by Claude Code and the installer; no window, no single-instance lock.
     match std::env::args().nth(1).as_deref() {
         Some("--hook") => return claude::hook(),
-        Some("--statusline") => return claude::statusline(),
+        Some("--statusline") => {
+            text::set(settings::load().language);
+            return claude::statusline();
+        }
         Some("--setup-claude") => return claude::setup(true),
         Some("--remove-claude") => return claude::setup(false),
         // Explorer's "Send to → Dynamic Island": hands the files to the running island.
@@ -45,9 +54,10 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    // One island per session; a second launch exits quietly. The handle lives as long as the process.
+    // One island per session; a second launch opens its settings and exits. The handle lives as long as the process.
     let _instance = unsafe { CreateMutexW(None, false, w!("Local\\com.nightdijital.dynamicisland"))? };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        window::show_running_settings();
         return Ok(());
     }
     if std::env::var_os("ISLAND_PANIC_TEST").is_some() {
@@ -94,14 +104,16 @@ fn eco_qos() {
     }
 }
 
+pub fn log_path() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("DynamicIsland").join("island.log"))
+}
+
 /// Appends a line to `%LOCALAPPDATA%\DynamicIsland\island.log`, keeping one 256 KB backup.
 pub fn log(message: impl std::fmt::Display) {
     #[cfg(debug_assertions)]
     eprintln!("{message}");
-    let Some(dir) = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("DynamicIsland")) else {
-        return;
-    };
-    let path = dir.join("island.log");
+    let Some(path) = log_path() else { return };
+    let dir = path.parent().unwrap();
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
         let _ = std::fs::rename(&path, dir.join("island.old.log"));
     }

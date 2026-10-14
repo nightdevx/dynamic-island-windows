@@ -26,11 +26,14 @@ use crate::{
     claude::{self, Limits, Session, State},
     fullscreen,
     island::{self, Hit, Island, Line, Tab, View, TOP},
-    log,
+    liked, log,
     media::{Command, Media, MediaLink},
+    notices,
+    preferences::{self, Preferences},
     privacy,
     settings::{self, Settings},
     shelf::{self, DropTarget, Shelf},
+    text::{self, tr},
     usage,
 };
 
@@ -52,6 +55,8 @@ const WM_DEVICE_LOST: u32 = WM_APP + 6;
 const WM_VOLUME: u32 = WM_APP + 7;
 const WM_AUDIO_DEVICE: u32 = WM_APP + 8;
 const WM_DRAG_FILES: u32 = WM_APP + 10; // WPARAM: 1 files came over, 0 they left, 2 dropped
+const WM_NOTICE: u32 = WM_APP + 11; // a new Windows notification to preview
+const NOTICE_MS: u32 = 4000;
 const SHELF_COPYDATA: usize = 0x5348_454C; // "SHEL": WM_COPYDATA from `island.exe --shelf`
 const VOLUME_MS: u32 = 1500;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1; // NINF_KEY
@@ -71,6 +76,8 @@ const TRAY_ID: u32 = 1;
 const ID_AUTOSTART: usize = 1;
 const ID_SETTINGS: usize = 2;
 const ID_EXIT: usize = 3;
+const ID_LIKED: usize = 4;
+const ID_QUIET: usize = 5; // do not disturb
 const ID_PLAY_PAUSE: usize = 10;
 const ID_NEXT: usize = 11;
 const ID_PREVIOUS: usize = 12;
@@ -102,6 +109,7 @@ struct App {
     seen: HashSet<String>,          // sessions waiting on the user that the user has already noticed
     compact_line: Option<CompactLine>, // what the closed island shows now; redrawn only on change
     media: Option<MediaLink>,
+    notices: Option<notices::Notices>,
     now_playing: Option<Media>,
     peek_tab: Tab, // the tab a peek opens to
     privacy: privacy::InUse,
@@ -112,6 +120,9 @@ struct App {
     dropping: bool,      // files are being dragged over the island
     shots_since: std::time::SystemTime, // the island's start: only screenshots after it show
     shots_seen: HashSet<std::path::PathBuf>, // screenshots already shown once, kept or not
+    liked: Vec<liked::Song>,                 // newest first
+    preferences: Option<Preferences>,        // the settings window, while open
+    region: RECT,                            // the clickable part of the window, as last set
 }
 
 /// Status, what it is about, 5-hour limit left and its color, color of the Claude mark.
@@ -129,6 +140,17 @@ pub fn send_to_shelf(paths: Vec<String>) {
             }
             Err(_) => log("shelf: the island is not running"),
         }
+    }
+}
+
+/// A second start of the island opens the running one's settings window.
+pub fn show_running_settings() {
+    unsafe {
+        let Ok(island) = FindWindowW(w!("NightdijitalIsland"), None) else { return };
+        let mut pid = 0;
+        GetWindowThreadProcessId(island, Some(&mut pid));
+        let _ = AllowSetForegroundWindow(pid); // ours to give: the user just started us
+        let _ = PostMessageW(Some(island), WM_COMMAND, WPARAM(ID_SETTINGS), LPARAM(0));
     }
 }
 
@@ -153,6 +175,7 @@ pub fn run() -> Result<()> {
         seen: HashSet::new(),
         compact_line: None,
         media: None,
+        notices: None,
         now_playing: None,
         peek_tab: Tab::Claude,
         privacy: privacy::in_use(), // what was in use before we started is not news
@@ -163,7 +186,11 @@ pub fn run() -> Result<()> {
         dropping: false,
         shots_since: std::time::SystemTime::now(),
         shots_seen: HashSet::new(),
+        liked: liked::load(),
+        preferences: None,
+        region: RECT::default(),
     };
+    text::set(app.settings.language);
     // Files dragged onto the island land on the shelf.
     let dropped = unsafe {
         OleInitialize(None).and_then(|_| RegisterDragDrop(hwnd, &IDropTarget::from(DropTarget::new(hwnd, WM_DRAG_FILES))))
@@ -177,9 +204,11 @@ pub fn run() -> Result<()> {
     app.reload_claude(false); // what was already waiting before we started is not news
     usage::refresh();
     app.media = Some(MediaLink::start(hwnd, WM_MEDIA, (crate::pages::ART_SOURCE * app.scale).round() as u32));
+    app.notices = Some(notices::Notices::start(hwnd, WM_NOTICE, (crate::pages::NOTICE_ICON * app.scale).round() as u32));
     app.watch_explorer();
     appbar(hwnd, ABM_NEW);
     app.hidden = fullscreen::should_hide(hwnd, &app.settings);
+    app.read_notices();
     unsafe {
         // Foreground changes: a fullscreen app may have come or gone, and another topmost
         // window activated after us would cover the island.
@@ -317,6 +346,7 @@ impl App {
                 island.set_art(media.and_then(|m| m.art.as_deref()), false)?;
             }
             self.compact_line = None;
+            self.show_like();
             self.show_claude_state(false);
             self.update_live();
             self.show_privacy();
@@ -328,12 +358,179 @@ impl App {
 
     fn reload_settings(&mut self) {
         let new = settings::load();
-        if new != self.settings {
-            log(format!("settings: {new:?}"));
-            self.settings = new;
-            self.refresh(); // the exe lists may change what counts as "hide"
-            self.update_live();
+        if new == self.settings {
+            return;
         }
+        log(format!("settings: {new:?}"));
+        let privacy = new.privacy_dot != self.settings.privacy_dot;
+        let language = new.language != self.settings.language;
+        self.settings = new;
+        if language {
+            // Everything drawn shows text: build the island again, in the new language.
+            text::set(self.settings.language);
+            if let Err(e) = self.place(true) {
+                log(format!("relayout for the language failed: {e}"));
+            }
+            self.media_command(Command::Refresh); // player names
+            if let Some(window) = &self.preferences {
+                window.retitle();
+            }
+        }
+        self.refresh(); // the exe lists may change what counts as "hide"
+        self.update_live();
+        if privacy {
+            self.show_privacy();
+        }
+        self.read_notices();
+        self.draw_preferences();
+    }
+
+    /// Notifications are read only while a preview could show: the island is on screen,
+    /// previews are on, and it may disturb.
+    fn read_notices(&self) {
+        if let Some(notices) = &self.notices {
+            notices.read(!self.hidden && self.settings.notifications && !self.settings.do_not_disturb);
+        }
+    }
+
+    /// Opens the settings window, or brings it back to the front. `offscreen` for tests.
+    fn open_preferences(&mut self, offscreen: bool) {
+        if let Some(window) = &self.preferences {
+            window.show();
+            return;
+        }
+        match Preferences::open(Some(preferences_proc), offscreen) {
+            Ok(mut window) => {
+                window.autostart = autostart_enabled();
+                window.claude = claude::connected();
+                log("settings window opened");
+                self.preferences = Some(window);
+                self.draw_preferences();
+            }
+            Err(e) => log(format!("settings window: {e}")),
+        }
+    }
+
+    fn draw_preferences(&mut self) {
+        if let Some(window) = self.preferences.as_mut() {
+            window.draw(&self.settings, &self.liked);
+        }
+    }
+
+    fn preferences_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        match self.preferences.as_mut()?.handle(msg, wparam, lparam) {
+            preferences::Event::Unhandled => return None,
+            preferences::Event::Nothing => {}
+            preferences::Event::Redraw => self.draw_preferences(),
+            preferences::Event::Act(action) => {
+                self.preference(action);
+                self.draw_preferences();
+            }
+            preferences::Event::Closed => {
+                self.preferences = None;
+                log("settings window closed");
+            }
+        }
+        Some(LRESULT(0))
+    }
+
+    /// Does what was clicked in the settings window. Settings go through the file, as if
+    /// edited by hand.
+    fn preference(&mut self, action: preferences::Action) {
+        use preferences::{Action, Link, List, Switch};
+        let mut settings = self.settings.clone();
+        fn names(s: &mut Settings, list: List) -> &mut Vec<String> {
+            if list == List::Hide {
+                &mut s.hide_exe
+            } else {
+                &mut s.show_exe
+            }
+        }
+        match action {
+            Action::Toggle(Switch::Autostart) => {
+                if let Err(e) = set_autostart(!autostart_enabled()) {
+                    log(format!("autostart: {e}"));
+                }
+                if let Some(window) = self.preferences.as_mut() {
+                    window.autostart = autostart_enabled();
+                }
+            }
+            Action::Toggle(Switch::Claude) => {
+                claude::setup(claude::connected() != Some(true));
+                if let Some(window) = self.preferences.as_mut() {
+                    window.claude = claude::connected();
+                }
+            }
+            Action::Toggle(switch) => {
+                switch.flip(&mut settings);
+            }
+            Action::Delay(ms) => settings.hover_delay_ms = ms,
+            Action::Language(language) => settings.language = language,
+            Action::Add(list, exe) => {
+                let names = names(&mut settings, list);
+                if !names.contains(&exe) {
+                    names.push(exe);
+                }
+            }
+            Action::Remove(list, index) => {
+                let names = names(&mut settings, list);
+                if index < names.len() {
+                    names.remove(index);
+                }
+            }
+            Action::Unlike(index) => {
+                if index < self.liked.len() {
+                    self.liked.remove(index);
+                    liked::save(&self.liked);
+                    self.show_like();
+                }
+            }
+            Action::Search(index) => {
+                if let Some(song) = self.liked.get(index) {
+                    shell_open(self.hwnd, &HSTRING::from(liked::search_url(song)));
+                }
+            }
+            Action::Open(Link::Website) => shell_open(self.hwnd, h!("https://nightdijital.com")),
+            Action::Open(Link::SettingsFile) => open_settings(self.hwnd),
+            Action::Open(Link::Log) => {
+                if let Some(path) = crate::log_path() {
+                    shell_open(self.hwnd, &HSTRING::from(path.as_path()));
+                }
+            }
+            Action::Section(_) | Action::Pick(_) | Action::Close => {}
+        }
+        if settings != self.settings {
+            text::set(settings.language); // the file's notes come in the language just picked
+            settings::save(&settings);
+            self.reload_settings();
+        }
+    }
+
+    /// The heart on the music page, for the song playing.
+    fn show_like(&mut self) {
+        let song = self.now_playing.as_ref().filter(|m| !m.title.is_empty());
+        let liked = song.map(|m| liked::find(&self.liked, &m.title, &m.artist).is_some());
+        if let Some(Err(e)) = self.island.as_mut().map(|island| island.draw_like(liked)) {
+            log(format!("heart failed: {e}"));
+        }
+    }
+
+    /// The heart was pressed: the song goes on the liked list, or comes off it.
+    fn toggle_like(&mut self) {
+        let Some(m) = self.now_playing.as_ref().filter(|m| !m.title.is_empty()) else { return };
+        match liked::find(&self.liked, &m.title, &m.artist) {
+            Some(index) => {
+                self.liked.remove(index);
+            }
+            None => {
+                let song = liked::Song { title: m.title.clone(), artist: m.artist.clone(), album: m.album.clone(), app: m.app.clone(), added: liked::now() };
+                self.liked.insert(0, song);
+            }
+        }
+        log(format!("liked songs: {}", self.liked.len()));
+        liked::save(&self.liked);
+        self.show_like();
+        self.draw_preferences();
     }
 
     /// A Claude session waits on the user and they have not looked yet.
@@ -349,14 +546,17 @@ impl App {
     fn update_live(&mut self) {
         let playing = self.now_playing.as_ref().is_some_and(|m| m.playing);
         let line = if playing && !self.claude_needs_user() { Line::Music } else { Line::Claude };
-        let equalizer = line == Line::Music && self.view == View::Compact && !self.hidden && self.settings.equalizer && animations_enabled();
+        let motion = animations_enabled();
+        let equalizer = line == Line::Music && self.view == View::Compact && !self.hidden && self.settings.equalizer && motion;
         let now = claude::now_ms();
         if let Some(island) = self.island.as_mut() {
-            let updated = island.set_line(line, equalizer).and_then(|_| island.set_progress(self.now_playing.as_ref(), now));
+            island.set_full_motion(motion);
+            let updated = island.set_line(line, equalizer, self.settings.glow).and_then(|_| island.set_progress(self.now_playing.as_ref(), now));
             if let Err(e) = updated {
                 log(format!("live parts failed: {e}"));
             }
         }
+        self.set_region(self.pill_size()); // the bubble may have come out or gone in
         self.arm_clock();
     }
 
@@ -400,7 +600,7 @@ impl App {
         }
         self.states = sessions.iter().map(|s| (s.id.clone(), s.state)).collect();
         self.seen.retain(|id| self.states.contains_key(id));
-        let peek = news.map(|s| {
+        let peek = news.filter(|_| self.settings.claude_peek).map(|s| {
             let name = if s.project.is_empty() { "Claude" } else { &s.project };
             (format!("{name} · {}", s.state.label()), s.state.color(), s.state == State::Permission)
         });
@@ -421,13 +621,16 @@ impl App {
     /// Opens the island a little for news, then closes it again after `ms`. Not over
     /// fullscreen apps and not when the user has it open already; newer news replaces a peek.
     /// A click on the peek opens `tab`.
-    fn peek(&mut self, tab: Tab, ms: u32, draw: impl FnOnce(&Island) -> Result<()>) {
-        if self.hidden || self.view == View::Expanded {
+    fn peek(&mut self, tab: Tab, ms: u32, draw: impl FnOnce(&mut Island) -> Result<()>) {
+        if self.hidden || self.view == View::Expanded || self.settings.do_not_disturb {
             return;
         }
-        let drawn = self.island.as_ref().map_or(Ok(()), draw);
+        let before = self.pill_size();
+        let drawn = self.island.as_mut().map_or(Ok(()), draw);
         self.peek_tab = tab;
-        match drawn.and_then(|_| self.set_view(View::Peek)) {
+        // A peek that replaces another may be taller or shorter (a notification is taller).
+        let shown = drawn.and_then(|_| if self.view == View::Peek { self.reshape(before) } else { self.set_view(View::Peek) });
+        match shown {
             Ok(()) => unsafe {
                 SetTimer(Some(self.hwnd), PEEK_TIMER, ms, None);
             },
@@ -449,6 +652,9 @@ impl App {
             return;
         }
         self.last_volume = Some((level, muted));
+        if !self.settings.volume_peek {
+            return;
+        }
         self.peek(Tab::Music, VOLUME_MS, |island| island.draw_volume(level, muted));
     }
 
@@ -461,11 +667,14 @@ impl App {
         log(format!("privacy: {now:?}"));
         let started = |new: &Option<String>, old: &Option<String>| new.clone().filter(|_| old.is_none());
         let news = started(&now.camera, &self.privacy.camera)
-            .map(|app| (format!("Kamera kullanımda · {app}"), CAMERA))
-            .or_else(|| started(&now.microphone, &self.privacy.microphone).map(|app| (format!("Mikrofon kullanımda · {app}"), MICROPHONE)));
+            .map(|app| (tr(format!("Kamera kullanımda · {app}"), format!("Camera in use · {app}")), CAMERA))
+            .or_else(|| {
+                let app = started(&now.microphone, &self.privacy.microphone)?;
+                Some((tr(format!("Mikrofon kullanımda · {app}"), format!("Microphone in use · {app}")), MICROPHONE))
+            });
         self.privacy = now;
         self.show_privacy();
-        if let Some((text, color)) = news {
+        if let Some((text, color)) = news.filter(|_| self.settings.privacy_dot) {
             let tab = self.tab().unwrap_or(Tab::Music);
             self.peek(tab, PEEK_MS, |island| island.draw_peek(&text, Some(color)));
         }
@@ -474,7 +683,9 @@ impl App {
     /// The privacy dot: green for the camera (which usually comes with the microphone),
     /// orange for the microphone alone. The closed pill grows to make room for it.
     fn show_privacy(&mut self) {
-        let color = if self.privacy.camera.is_some() {
+        let color = if !self.settings.privacy_dot {
+            None
+        } else if self.privacy.camera.is_some() {
             Some(CAMERA)
         } else {
             self.privacy.microphone.as_ref().map(|_| MICROPHONE)
@@ -497,9 +708,9 @@ impl App {
         let (status, detail, mark) = claude::summary(&self.sessions, |s| !self.seen.contains(&s.id));
         // ponytail: a limit that resets while nothing happens shows 100 only at the next event
         let line = (status, detail, claude::five_hour_used(&self.limits, claude::now_ms() / 1000), mark);
-        let Some(island) = &self.island else { return };
+        let Some(island) = self.island.as_mut() else { return };
         if self.compact_line.as_ref() != Some(&line) {
-            if let Err(e) = island.draw_compact(&line.0, &line.1, line.2, line.3) {
+            if let Err(e) = island.draw_compact(&line.0, &line.1, line.2, line.3).and_then(|_| island.set_bubble(line.2)) {
                 log(format!("compact line failed: {e}"));
             }
             self.compact_line = Some(line);
@@ -612,7 +823,10 @@ impl App {
         if self.view == View::Expanded && self.tab() == Some(Tab::Shelf) {
             self.draw_shelf();
         } else {
-            let text = if added == 1 { "Ekran görüntüsü rafta".to_string() } else { format!("{added} ekran görüntüsü rafta") };
+            let text = match added {
+                1 => tr("Ekran görüntüsü rafta", "Screenshot on the shelf").to_string(),
+                n => tr(format!("{n} ekran görüntüsü rafta"), format!("{n} screenshots on the shelf")),
+            };
             self.peek(Tab::Shelf, PEEK_MS, |island| island.draw_peek(&text, Some(0xFF0A84FF)));
         }
     }
@@ -630,14 +844,21 @@ impl App {
     }
 
     /// Clicks outside this rectangle fall through to the window below.
-    fn set_region(&self, (w, h): (f32, f32)) {
+    /// The pill (and the limit bubble beside it, when out); set again only when it changes.
+    fn set_region(&mut self, (w, h): (f32, f32)) {
         let s = self.scale;
         let (window_w, _) = island::window_size(s);
-        let pad = 6.0 * s;
+        let pad = 9.0 * s; // the pill's shadow and glow
         let rw = w * s + 2.0 * pad;
         let left = ((window_w as f32 - rw) / 2.0).floor() as i32;
+        let bubble = self.island.as_ref().map_or(0.0, |island| island.bubble_extent()) * s;
+        let rect = RECT { left, top: 0, right: left + (rw + bubble).ceil() as i32, bottom: ((TOP + h) * s + pad).ceil() as i32 };
+        if rect == self.region {
+            return;
+        }
+        self.region = rect;
         unsafe {
-            let rgn = CreateRectRgn(left, 0, left + rw.ceil() as i32, ((TOP + h) * s + pad).ceil() as i32);
+            let rgn = CreateRectRgn(rect.left, rect.top, rect.right, rect.bottom);
             // The system owns the region after this call.
             SetWindowRgn(self.hwnd, Some(rgn), true);
         }
@@ -691,6 +912,7 @@ impl App {
                 }
             }
             self.update_live();
+            self.read_notices();
             log(if hide { "hidden" } else { "shown" });
         }
         if !self.hidden {
@@ -785,7 +1007,7 @@ impl App {
         }
         // Players report the position often while playing; that alone redraws nothing but the
         // clock and the progress, and only while the music page is open.
-        let shown = |m: &Media| (m.can_previous, m.can_toggle, m.can_next, m.duration > 0.0, m.shuffle, m.repeat);
+        let shown = |m: &Media| (m.can_previous, m.can_toggle, m.can_next, m.duration > 0.0, m.shuffle, m.repeat, m.sessions, m.index);
         let redraw = match (&old, &media) {
             (Some(a), Some(b)) => new_track || playing_changed || shown(a) != shown(b),
             (None, None) => false,
@@ -805,17 +1027,34 @@ impl App {
                 let art = media.as_ref().and_then(|m| m.art.as_deref());
                 drawn = drawn.and_then(|_| island.set_art(art, new_track && old.is_some()));
             }
+            if new_track && old.is_some() {
+                drawn = drawn.and_then(|_| island.new_track());
+            }
             if let Err(e) = drawn {
                 log(format!("media draw failed: {e}"));
             }
         }
         self.now_playing = media;
+        if redraw {
+            self.show_like();
+        }
         self.update_live();
 
         let song = self.now_playing.as_ref().filter(|m| new_track && m.playing && !m.title.is_empty());
         if let Some(text) = song.map(|m| if m.artist.is_empty() { m.title.clone() } else { format!("{} — {}", m.title, m.artist) }) {
-            if !self.claude_needs_user() {
+            if !self.claude_needs_user() && self.settings.song_peek {
                 self.peek(Tab::Music, PEEK_MS, |island| island.draw_peek(&text, None));
+            }
+        }
+    }
+
+    /// The closed pill grows a little under the mouse, and back when it leaves.
+    fn set_hover(&mut self, on: bool) {
+        let before = self.pill_size();
+        let Some(island) = self.island.as_mut() else { return };
+        if island.set_hover(on) && self.view != View::Expanded {
+            if let Err(e) = self.reshape(before) {
+                log(format!("hover failed: {e}"));
             }
         }
     }
@@ -881,6 +1120,14 @@ impl App {
                 self.shelves[self.list].clear();
                 self.draw_shelf();
             }
+            Hit::Like => self.toggle_like(),
+            Hit::ShowPlayer => {
+                if let Some(m) = &self.now_playing {
+                    crate::player::show(m.app_id.clone(), m.title.clone());
+                }
+            }
+            Hit::NextPlayer => self.media_command(Command::NextSession),
+            Hit::Settings => self.open_preferences(false),
         }
         Ok(())
     }
@@ -906,6 +1153,7 @@ impl App {
                     };
                     unsafe { TrackMouseEvent(&mut tme)? };
                     self.tracking = true;
+                    self.set_hover(true);
                 }
                 unsafe { KillTimer(Some(self.hwnd), LEAVE_TIMER).ok() };
             }
@@ -918,11 +1166,19 @@ impl App {
                 match (self.view, hit) {
                     (View::Expanded, Some(hit)) => self.click(hit)?,
                     (View::Expanded, None) => {}
-                    _ => self.expand()?,
+                    _ => {
+                        // The bubble opens the island on Claude's limits.
+                        if let Some(island) = self.island.as_mut().filter(|island| island.on_bubble(x, y)) {
+                            island.set_tab(Tab::Claude)?;
+                            self.peek_tab = Tab::Claude;
+                        }
+                        self.expand()?
+                    }
                 }
             }
             WM_MOUSELEAVE => {
                 self.tracking = false;
+                self.set_hover(false);
                 unsafe { SetTimer(Some(self.hwnd), LEAVE_TIMER, LEAVE_MS, None) };
             }
             WM_TIMER if wparam.0 == SHOT_TIMER => self.add_screenshots(),
@@ -974,6 +1230,12 @@ impl App {
             WM_MEDIA => self.media_changed(),
             WM_VOLUME => self.show_volume(wparam.0 as u32, lparam.0 != 0),
             WM_DRAG_FILES => self.files_dragged(wparam.0),
+            WM_NOTICE => {
+                if let Some(notice) = self.notices.as_ref().and_then(notices::Notices::take) {
+                    let tab = self.tab().unwrap_or(Tab::Music);
+                    self.peek(tab, NOTICE_MS, |island| island.draw_notice(&notice));
+                }
+            }
             // Files sent with `island.exe --shelf` (Explorer's "Send to").
             WM_COPYDATA => {
                 let data = unsafe { (lparam.0 as *const COPYDATASTRUCT).as_ref() };
@@ -986,7 +1248,10 @@ impl App {
                 if self.view == View::Expanded && self.tab() == Some(Tab::Shelf) {
                     self.draw_shelf();
                 } else if added > 0 {
-                    let text = format!("{added} dosya rafta");
+                    let text = match added {
+                        1 => tr("1 dosya rafta", "1 file on the shelf").to_string(),
+                        n => tr(format!("{n} dosya rafta"), format!("{n} files on the shelf")),
+                    };
                     self.peek(Tab::Shelf, PEEK_MS, |island| island.draw_peek(&text, Some(0xFF0A84FF)));
                 }
                 return Ok(Some(LRESULT(1)));
@@ -1009,7 +1274,20 @@ impl App {
                     set_autostart(on)?;
                     log(format!("autostart {on}"));
                 }
-                ID_SETTINGS => open_settings(self.hwnd),
+                ID_SETTINGS => self.open_preferences(lparam.0 == 1), // 1: tests, off screen
+                ID_QUIET => {
+                    let mut settings = self.settings.clone();
+                    settings.do_not_disturb = !settings.do_not_disturb;
+                    settings::save(&settings);
+                    self.reload_settings();
+                }
+                ID_LIKED => {
+                    self.open_preferences(false);
+                    if let Some(window) = self.preferences.as_mut() {
+                        window.show_section(preferences::Section::Liked);
+                    }
+                    self.draw_preferences();
+                }
                 ID_EXIT => unsafe { DestroyWindow(self.hwnd)? },
                 _ => return Ok(None),
             },
@@ -1069,6 +1347,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
         }
     });
+    handled.unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) })
+}
+
+/// The settings window's messages go to the island's App, which holds the window.
+extern "system" fn preferences_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let handled = APP.with(|cell| cell.try_borrow_mut().ok()?.as_mut()?.preferences_message(msg, wparam, lparam));
     handled.unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) })
 }
 
@@ -1247,10 +1531,14 @@ fn show_menu(hwnd: HWND) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let check = if autostart_enabled() { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | check, ID_AUTOSTART, w!("Başlangıçta çalıştır"));
-        let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Ayarlar dosyasını aç"));
+        let item = |turkish: &str, english: &str| HSTRING::from(tr(turkish, english));
+        let _ = AppendMenuW(menu, MF_STRING | check, ID_AUTOSTART, &item("Başlangıçta çalıştır", "Start with Windows"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, &item("Ayarlar", "Settings"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_LIKED, &item("Beğenilen şarkılar", "Liked songs"));
+        let quiet = if settings::load().do_not_disturb { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, MF_STRING | quiet, ID_QUIET, &item("Rahatsız etmeyin", "Do not disturb"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("Çıkış"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, &item("Çıkış", "Quit"));
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         // Without the foreground the menu would not close when the user clicks elsewhere.
@@ -1269,8 +1557,13 @@ fn show_menu(hwnd: HWND) {
 fn open_settings(hwnd: HWND) {
     settings::load(); // creates the file on first use
     if let Some(path) = settings::path() {
-        unsafe { ShellExecuteW(Some(hwnd), w!("open"), &HSTRING::from(path.as_path()), None, None, SW_SHOWNORMAL) };
+        shell_open(hwnd, &HSTRING::from(path.as_path()));
     }
+}
+
+/// Opens a file or a web page with what Windows opens it with.
+fn shell_open(hwnd: HWND, target: &HSTRING) {
+    unsafe { ShellExecuteW(Some(hwnd), w!("open"), target, None, None, SW_SHOWNORMAL) };
 }
 
 fn autostart_enabled() -> bool {

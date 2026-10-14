@@ -96,6 +96,13 @@ impl Volume {
     }
 }
 
+/// Whether a process with this (lowercase) exe name plays for the media session `app_id`
+/// (lowercase): "brave" plays from brave.exe, "spotify.exe" from spotify.exe.
+pub fn plays_for(app_id: &str, exe: &str) -> bool {
+    let stem = exe.trim_end_matches(".exe");
+    stem.len() >= 3 && app_id.contains(stem)
+}
+
 impl Drop for Volume {
     fn drop(&mut self) {
         unsafe {

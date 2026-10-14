@@ -17,7 +17,7 @@ use windows::{
     },
 };
 
-use crate::json;
+use crate::{json, text::tr};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum State {
@@ -30,10 +30,10 @@ pub enum State {
 impl State {
     pub fn label(self) -> &'static str {
         match self {
-            State::Open => "açık",
-            State::Working => "çalışıyor",
-            State::Permission => "izin bekliyor",
-            State::Done => "yanıt hazır",
+            State::Open => tr("açık", "open"),
+            State::Working => tr("çalışıyor", "working"),
+            State::Permission => tr("izin bekliyor", "needs permission"),
+            State::Done => tr("yanıt hazır", "answer ready"),
         }
     }
 
@@ -181,9 +181,10 @@ fn record_statusline(input: &str) -> Result<String> {
 fn status_text(model: &str, limits: Option<&Limits>) -> String {
     let mut parts = vec![model.to_string()];
     if let Some(limits) = limits {
-        for (label, window) in [("5 sa", limits.five_hour), ("hafta", limits.seven_day)] {
+        for (label, window) in [(tr("5 sa", "5h"), limits.five_hour), (tr("hafta", "week"), limits.seven_day)] {
             if let Some(w) = window {
-                parts.push(format!("{label} %{:.0} kullanıldı", w.used_percentage.clamp(0.0, 100.0)));
+                let used = w.used_percentage.clamp(0.0, 100.0);
+                parts.push(tr(format!("{label} %{used:.0} kullanıldı"), format!("{label} {used:.0}% used")));
             }
         }
     }
@@ -292,6 +293,21 @@ pub fn setup(add: bool) {
     crate::log(format!("claude setup: {}", outcome.unwrap_or_else(|e: String| format!("failed: {e}"))));
 }
 
+/// Whether Claude Code reports to the island; None when Claude Code is not installed.
+pub fn connected() -> Option<bool> {
+    let dir = PathBuf::from(std::env::var_os("USERPROFILE")?).join(".claude");
+    if !dir.is_dir() {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join("settings.json")).unwrap_or_default();
+    let root = json::parse(&text);
+    Some(root.is_some_and(|root| {
+        let mut without = root.clone();
+        remove_island(&mut without);
+        without != root || is_island(root.get("statusLine").and_then(|s| s.get("command")))
+    }))
+}
+
 /// Edits settings.json in place: other keys, hooks and formatting stay as they are. The
 /// first edit keeps a copy of the file as it was. Returns what it did.
 fn edit_settings(path: &std::path::Path, exe: &str, add: bool) -> std::result::Result<String, String> {
@@ -398,18 +414,18 @@ pub fn summary(sessions: &[Session], unseen: impl Fn(&Session) -> bool) -> (Stri
     };
     let line = |title: &str, detail: String, state: State| (title.to_string(), detail, state.color());
     if let Some(s) = sessions.iter().find(|s| s.state == State::Permission) {
-        return line("İzin bekliyor", about(s), State::Permission);
+        return line(tr("İzin bekliyor", "Needs permission"), about(s), State::Permission);
     }
     if let Some(s) = sessions.iter().find(|s| s.state == State::Done && unseen(s)) {
-        return line("Yanıt hazır", about(s), State::Done);
+        return line(tr("Yanıt hazır", "Answer ready"), about(s), State::Done);
     }
     let working: Vec<&Session> = sessions.iter().filter(|s| s.state == State::Working).collect();
     match (working.len(), sessions.len()) {
-        (1, _) => line("Çalışıyor", about(working[0]), State::Working),
-        (n, _) if n > 1 => line("Çalışıyor", format!("{n} oturum"), State::Working),
-        (_, 0) => line("Claude", "Açık oturum yok".into(), State::Open),
+        (1, _) => line(tr("Çalışıyor", "Working"), about(working[0]), State::Working),
+        (n, _) if n > 1 => line(tr("Çalışıyor", "Working"), tr(format!("{n} oturum"), format!("{n} sessions")), State::Working),
+        (_, 0) => line("Claude", tr("Açık oturum yok", "No open sessions").into(), State::Open),
         (_, 1) => line("Claude", name(&sessions[0]), State::Open),
-        (_, n) => line("Claude", format!("{n} oturum açık"), State::Open),
+        (_, n) => line("Claude", tr(format!("{n} oturum açık"), format!("{n} sessions open")), State::Open),
     }
 }
 
@@ -542,6 +558,9 @@ mod tests {
         assert_eq!(text(summary(&done, all)), "Yanıt hazır / app +1");
         // An answer the user already saw no longer takes the line.
         assert_eq!(text(summary(&done, |_| false)), "Çalışıyor / web +1");
+        crate::text::set(crate::text::Language::English);
+        assert_eq!(text(summary(&open, all)), "Claude / 2 sessions open");
+        assert_eq!(text(summary(&done, all)), "Answer ready / app +1");
 
         let limits = Limits { five_hour: Some(Window { used_percentage: 92.6, resets_at: 100 }), ..Limits::default() };
         let used = five_hour_used(&limits, 50).unwrap();

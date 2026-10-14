@@ -70,7 +70,7 @@ pub fn class_name(hwnd: HWND) -> String {
 }
 
 /// Lowercase file name of the process owning `hwnd`, or "" when it cannot be read.
-fn exe_name(hwnd: HWND) -> String {
+pub fn exe_name(hwnd: HWND) -> String {
     unsafe {
         let mut pid = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));

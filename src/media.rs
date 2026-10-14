@@ -49,6 +49,7 @@ pub struct Art {
 #[derive(Clone)]
 pub struct Media {
     pub app: String,
+    pub app_id: String, // the session's AppUserModelId ("Brave", "Spotify.exe", a package's)
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -64,6 +65,7 @@ pub struct Media {
     pub shuffle: Option<bool>, // None: the player has no shuffle
     pub repeat: Option<MediaPlaybackAutoRepeatMode>,
     pub sessions: u32,
+    pub index: u32, // which of the sessions this is, from 0
     pub art: Option<Arc<Art>>,
 }
 
@@ -173,7 +175,7 @@ fn run(
     manager.SessionsChanged(&ping(events))?;
 
     let mut watched: Option<Watched> = None;
-    let mut chosen: Option<String> = None; // session picked with the wheel, by app id
+    let mut chosen: Option<GlobalSystemMediaTransportControlsSession> = None; // picked by the user, while it lasts
     let mut art: Option<(String, Option<Arc<Art>>)> = None; // track key and its art
     // Look again after this long even without an event: the art is often missing right after
     // a track change, a player that is still starting answers "not ready" (bounded), and a
@@ -217,8 +219,13 @@ fn run(
         batch.extend(inbox.try_iter());
 
         // Nothing below may end the thread: a failed call is logged and tried again.
+        // In a steady order (Windows reorders them by recent use), so "1/2" stays with one player.
         let sessions: Vec<GlobalSystemMediaTransportControlsSession> = match manager.GetSessions() {
-            Ok(list) => list.into_iter().collect(),
+            Ok(list) => {
+                let mut list: Vec<_> = list.into_iter().collect();
+                list.sort_by_cached_key(|s| s.SourceAppUserModelId().map(|a| a.to_string()).unwrap_or_default());
+                list
+            }
             Err(e) => {
                 failures += 1;
                 crate::log(format!("media sessions: {e}"));
@@ -227,14 +234,15 @@ fn run(
             }
         };
         let count = sessions.len() as u32;
-        let find = |id: &str| sessions.iter().find(|s| s.SourceAppUserModelId().is_ok_and(|a| a == *id)).cloned();
+        // Sessions are told apart by identity, not by app: two of one app (a browser's) take turns too.
+        let position = |s: &GlobalSystemMediaTransportControlsSession| sessions.iter().position(|o| o.as_raw() == s.as_raw());
         if batch.iter().any(|c| matches!(c, Command::NextSession)) && count > 1 {
-            let ids: Vec<String> = sessions.iter().filter_map(|s| s.SourceAppUserModelId().ok()).map(|a| a.to_string()).collect();
-            let current = chosen.clone().or_else(|| manager.GetCurrentSession().ok()?.SourceAppUserModelId().ok().map(|a| a.to_string()));
-            let index = current.and_then(|c| ids.iter().position(|id| *id == c)).map_or(0, |i| (i + 1) % ids.len());
-            chosen = ids.get(index).cloned();
+            // From the one on screen to the next.
+            let shown = watched.as_ref().map(|w| w.session.clone()).or_else(|| manager.GetCurrentSession().ok());
+            let next = shown.as_ref().and_then(position).map_or(0, |i| (i + 1) % sessions.len());
+            chosen = sessions.get(next).cloned();
         }
-        let session = chosen.as_deref().and_then(find).or_else(|| {
+        let session = chosen.as_ref().and_then(position).map(|i| sessions[i].clone()).or_else(|| {
             chosen = None; // the chosen player went away: follow Windows' pick again
             manager.GetCurrentSession().ok()
         });
@@ -247,7 +255,7 @@ fn run(
             let first_raw = first.as_raw();
             let others = sessions.iter().filter(|s| s.as_raw() != first_raw).cloned();
             for candidate in std::iter::once(first).chain(others) {
-                match read(&candidate, count) {
+                match read(&candidate, count, position(&candidate).unwrap_or(0) as u32) {
                     Ok(read) => {
                         media = Some(read);
                         session = Some(candidate);
@@ -338,7 +346,7 @@ fn run(
     }
 }
 
-fn read(session: &GlobalSystemMediaTransportControlsSession, sessions: u32) -> Result<Media> {
+fn read(session: &GlobalSystemMediaTransportControlsSession, sessions: u32, index: u32) -> Result<Media> {
     let properties = session.TryGetMediaPropertiesAsync()?.join()?;
     let info = session.GetPlaybackInfo()?;
     let controls = info.Controls()?;
@@ -347,8 +355,10 @@ fn read(session: &GlobalSystemMediaTransportControlsSession, sessions: u32) -> R
     // DateTime counts 100 ns ticks since 1601.
     let updated = timeline.LastUpdatedTime()?.UniversalTime;
     let updated_ms = if updated > 116_444_736_000_000_000 { ((updated - 116_444_736_000_000_000) / 10_000) as u64 } else { now_ms() };
+    let app_id = session.SourceAppUserModelId()?.to_string();
     Ok(Media {
-        app: app_name(&session.SourceAppUserModelId()?.to_string()),
+        app: app_name(&app_id),
+        app_id,
         title: properties.Title()?.to_string(),
         artist: properties.Artist()?.to_string(),
         album: properties.AlbumTitle()?.to_string(),
@@ -366,13 +376,20 @@ fn read(session: &GlobalSystemMediaTransportControlsSession, sessions: u32) -> R
             .IsRepeatEnabled()?
             .then(|| info.AutoRepeatMode().and_then(|v| v.Value()).unwrap_or(MediaPlaybackAutoRepeatMode::None)),
         sessions,
+        index,
         art: None,
     })
 }
 
 /// Decodes the thumbnail, crops it to the middle square (video thumbnails are 16:9) and
 /// scales it to `size` pixels, so a 640 px original is never kept around.
-fn decode_art(thumbnail: &IRandomAccessStreamReference, size: u32) -> Result<Art> {
+pub fn decode_art(thumbnail: &IRandomAccessStreamReference, size: u32) -> Result<Art> {
+    decode_square(thumbnail, size, false)
+}
+
+/// As `decode_art`; `trim` first cuts away a transparent margin, so the content fills the
+/// square (app logos come padded, each app differently).
+pub fn decode_square(thumbnail: &IRandomAccessStreamReference, size: u32, trim: bool) -> Result<Art> {
     unsafe {
         let stream = thumbnail.OpenReadAsync()?.join()?;
         let stream: IStream = CreateStreamOverRandomAccessStream(&stream)?;
@@ -380,8 +397,17 @@ fn decode_art(thumbnail: &IRandomAccessStreamReference, size: u32) -> Result<Art
         let frame = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?.GetFrame(0)?;
         let (mut w, mut h) = (0, 0);
         frame.GetSize(&mut w, &mut h)?;
-        let side = w.min(h);
-        let square = WICRect { X: ((w - side) / 2) as i32, Y: ((h - side) / 2) as i32, Width: side as i32, Height: side as i32 };
+        let (x, y, side) = if trim {
+            let full = wic.CreateFormatConverter()?;
+            full.Initialize(&frame, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            full.CopyPixels(std::ptr::null(), w * 4, &mut pixels)?;
+            content_square(&pixels, w, h)
+        } else {
+            let side = w.min(h);
+            ((w - side) / 2, (h - side) / 2, side)
+        };
+        let square = WICRect { X: x as i32, Y: y as i32, Width: side as i32, Height: side as i32 };
         let clipper = wic.CreateBitmapClipper()?;
         clipper.Initialize(&frame, &square)?;
         let scaler = wic.CreateBitmapScaler()?;
@@ -392,6 +418,25 @@ fn decode_art(thumbnail: &IRandomAccessStreamReference, size: u32) -> Result<Art
         converter.CopyPixels(std::ptr::null(), size * 4, &mut pixels)?;
         Ok(Art { size, pixels })
     }
+}
+
+/// The square (x, y, side) around what is not transparent in `w`×`h` BGRA pixels, centered on
+/// it and kept inside the picture; the middle square when all of it is transparent.
+fn content_square(pixels: &[u8], w: u32, h: u32) -> (u32, u32, u32) {
+    let (mut left, mut top, mut right, mut bottom) = (w, h, 0, 0);
+    for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
+        if px[3] > 16 {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            (left, top, right, bottom) = (left.min(x), top.min(y), right.max(x + 1), bottom.max(y + 1));
+        }
+    }
+    let largest = w.min(h);
+    if right <= left {
+        return ((w - largest) / 2, (h - largest) / 2, largest);
+    }
+    let side = (right - left).max(bottom - top).min(largest);
+    let place = |from: u32, to: u32, room: u32| ((from + to) / 2).saturating_sub(side / 2).min(room - side);
+    (place(left, right, w), place(top, bottom, h), side)
 }
 
 /// "Spotify.exe", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", "MSEdge" → a name people know.
@@ -405,7 +450,7 @@ fn app_name(app_id: &str) -> String {
         "chrome" => "Chrome".into(),
         "firefox" => "Firefox".into(),
         "spotify" | "spotifymusic" => "Spotify".into(),
-        "zunemusic" => "Medya Oynatıcı".into(),
+        "zunemusic" => crate::text::tr("Medya Oynatıcı", "Media Player").into(),
         "applemusic" | "itunes" => "Apple Music".into(),
         _ => base.to_string(),
     }
@@ -414,6 +459,23 @@ fn app_name(app_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logos_lose_their_margin() {
+        // A 10×10 picture with something opaque from (3, 2) to (6, 7): 4 wide, 6 tall.
+        let mut pixels = vec![0u8; 10 * 10 * 4];
+        for y in 2..8 {
+            for x in 3..7 {
+                pixels[(y * 10 + x) * 4 + 3] = 255;
+            }
+        }
+        assert_eq!(content_square(&pixels, 10, 10), (2, 2, 6));
+        // Near an edge the square stays inside.
+        let mut corner = vec![0u8; 10 * 10 * 4];
+        corner[(9 * 10 + 9) * 4 + 3] = 255;
+        assert_eq!(content_square(&corner, 10, 10), (9, 9, 1));
+        assert_eq!(content_square(&vec![0u8; 10 * 6 * 4], 10, 6), (2, 0, 6)); // nothing: the middle
+    }
 
     #[test]
     fn app_names() {
@@ -428,6 +490,7 @@ mod tests {
     fn position_runs_on_while_playing() {
         let media = Media {
             app: String::new(),
+            app_id: String::new(),
             title: String::new(),
             artist: String::new(),
             album: String::new(),
@@ -443,6 +506,7 @@ mod tests {
             shuffle: None,
             repeat: None,
             sessions: 1,
+            index: 0,
             art: None,
         };
         assert_eq!(media.position_at(6_000), 15.0);
