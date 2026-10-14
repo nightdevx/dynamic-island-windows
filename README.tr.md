@@ -5,7 +5,7 @@
 <h1 align="center">Windows için Dynamic Island</h1>
 
 <p align="center">
-  Ekranın üst ortasında, iPhone'daki Dynamic Island gibi küçük bir hap: çalan müzik, Claude Code oturumların, kulaklık pili ve mikrofon/kamera kullanımı tek bakışta.
+  Ekranın üst ortasında, iPhone'daki Dynamic Island gibi küçük bir hap: çalan müzik, Claude Code oturumların, ses seviyesi ve mikrofon/kamera kullanımı tek bakışta.
 </p>
 
 <p align="center">
@@ -36,7 +36,6 @@
 - **Claude Code:** açık oturumlar ve ne yaptıkları (çalışıyor, izin bekliyor, yanıt hazır), 5 saatlik ve haftalık plan limitleri. Seni bekleyen bir oturum kısa bir önizleme açar. Bir oturuma tıklamak onun penceresini öne getirir.
 - **Ses seviyesi:** sistem sesi değişince seviye kısa süre görünür.
 - **Mikrofon ve kamera:** bir uygulama kullanırken hap uzar ve ucunda nokta yanar: mikrofonda turuncu, kamerada yeşil.
-- **Razer Barracuda X pili** (2.4 GHz alıcıyla): yüzde ve şarj durumu. Şarja takınca ve pil azalınca önizleme açılır.
 - **Yolunuza çıkmaz:** tam ekran uygulamalarda ve oyunlarda kendiliğinden gizlenir, diğer zamanlarda pencerelerin üstünde kalır.
 
 <p align="center">
@@ -105,7 +104,7 @@ Kurulumda bu seçeneği atladıysanız `island.exe --setup-claude` komutu aynı 
 
 Bilgisayarınızdan tek bir istek dışında hiçbir şey çıkmaz: plan limitlerinizi göstermek için island, Claude Code'un kaydettiği oturum bilgisini (`~/.claude/.credentials.json`) okuyup Anthropic'ten kullanımınızı sorar. Bilgi yalnızca `api.anthropic.com` adresine HTTPS ile gider, saklanmaz ve log'a yazılmaz; sorgu en fazla 3 dakikada bir ve yalnızca Claude kullanılırken yapılır.
 
-Mikrofon ve kamera bilgisi, görev çubuğundaki mikrofon simgesini de besleyen Windows izin kayıtlarından gelir. Kulaklık pili, kulaklığın USB alıcısından okunur. BarracudaBattery uygulaması da açıksa island onun okumalarını dinler ve kulaklığa ayrıca sormaz.
+Mikrofon ve kamera bilgisi, görev çubuğundaki mikrofon simgesini de besleyen Windows izin kayıtlarından gelir.
 
 ## Kaldırma
 

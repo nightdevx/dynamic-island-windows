@@ -5,7 +5,7 @@
 <h1 align="center">Dynamic Island for Windows</h1>
 
 <p align="center">
-  A small pill at the top of your screen, like the iPhone's Dynamic Island: what's playing, your Claude Code sessions, headset battery and mic/camera use, at a glance.
+  A small pill at the top of your screen, like the iPhone's Dynamic Island: what's playing, your Claude Code sessions, volume and mic/camera use, at a glance.
 </p>
 
 <p align="center">
@@ -36,7 +36,6 @@
 - **Claude Code:** open sessions and what they are doing (working, waiting for permission, answer ready), plus your 5-hour and weekly plan limits. A session that needs you opens a short peek. Click a session to bring its window to the front.
 - **Volume:** a short peek with the level whenever the system volume changes.
 - **Microphone and camera:** while an app uses them, the island grows a dot, orange for the microphone and green for the camera.
-- **Razer Barracuda X battery** (2.4 GHz dongle): percent and charging, with a peek when you plug it in and when it runs low.
 - **Out of the way:** hides by itself in fullscreen apps and games, and stays above other windows otherwise.
 
 <p align="center">
@@ -107,7 +106,7 @@ Or run `island.exe --setup-claude`, which does the same as the installer option 
 
 Nothing leaves your PC except one request: to show your plan limits, the island reads the sign-in Claude Code saved (`~/.claude/.credentials.json`) and asks Anthropic's API for your usage. The token goes only to `api.anthropic.com` over HTTPS, is never stored or logged, and is used at most every 3 minutes, only while you use Claude.
 
-Microphone and camera use comes from Windows' own privacy records, the same ones behind the microphone icon in the taskbar. The headset battery is read from its USB dongle. If the BarracudaBattery app runs too, the island listens to its readings instead of asking the headset itself.
+Microphone and camera use comes from Windows' own privacy records, the same ones behind the microphone icon in the taskbar.
 
 ## Uninstall
 
@@ -133,7 +132,8 @@ How it is put together:
 | `src/pages.rs`, `src/render.rs` | What gets drawn (Direct2D/DirectWrite) |
 | `src/media.rs` | Windows media sessions, on their own thread |
 | `src/claude.rs`, `src/usage.rs` | Claude Code hooks, sessions and plan limits |
-| `src/audio.rs`, `src/privacy.rs`, `src/headset.rs` | Volume, microphone/camera, headset battery |
+| `src/audio.rs`, `src/privacy.rs` | Volume, microphone/camera |
+| `src/json.rs` | Editing Claude Code's settings without reordering them |
 | `src/fullscreen.rs` | When to hide |
 
 ## Contact

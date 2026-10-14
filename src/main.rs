@@ -3,7 +3,6 @@
 mod audio;
 mod claude;
 mod fullscreen;
-mod headset;
 mod island;
 mod json;
 mod media;

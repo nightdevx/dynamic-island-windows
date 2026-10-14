@@ -5,7 +5,6 @@ use windows::core::Result;
 
 use crate::{
     claude::{Limits, Session, State, Window},
-    headset::Battery,
     media::{Art, Media},
     render::{Align, Canvas},
 };
@@ -70,28 +69,6 @@ pub fn times(c: &Canvas, media: Option<&Media>, now_ms: u64) -> Result<()> {
 pub fn button(c: &Canvas, glyph: char, enabled: bool) -> Result<()> {
     let size = if glyph == PLAY || glyph == PAUSE { 20.0 } else { 15.0 };
     c.icon(glyph, (0.0, 0.0, BUTTON, BUTTON), size, if enabled { TEXT } else { DISABLED })
-}
-
-pub const LOW_BATTERY: u32 = 20;
-pub const RED: u32 = 0xFFFF453A;
-pub const GREEN: u32 = 0xFF30D158;
-
-/// Width `headset` takes.
-pub const HEADSET_W: f32 = 46.0;
-
-/// Headset battery in a line `h` high from `(x, y)`: headphones (with a bolt on them while
-/// charging) and the percent. Green while charging, red when low.
-pub fn headset(c: &Canvas, (x, y, h): (f32, f32, f32), battery: Battery) -> Result<()> {
-    let color = match battery {
-        Battery { charging: true, .. } => GREEN,
-        Battery { percent, .. } if (percent as u32) < LOW_BATTERY => RED,
-        _ => DIM,
-    };
-    c.icon('\u{E7F6}', (x, y, 16.0, h), 13.0, color)?; // Headphone
-    if battery.charging {
-        c.icon('\u{E945}', (x + 9.0, y - 6.0, 10.0, h), 8.0, color)?; // LightningBolt, on the earcup
-    }
-    c.text(&format!("%{}", battery.percent), (x + 18.0, y, HEADSET_W - 18.0, h), 11.0, true, color, Align::Left)
 }
 
 /// The closed island's two lines: a bold title and a dim line under it, `w` wide.

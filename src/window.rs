@@ -21,9 +21,7 @@ use crate::{
     fullscreen,
     island::{self, Hit, Island, Line, Tab, View, TOP},
     log,
-    headset::{self, Battery, HeadsetLink},
     media::{Command, Media, MediaLink},
-    pages::{GREEN, RED},
     privacy,
     settings::{self, Settings},
     usage,
@@ -46,8 +44,6 @@ const WM_MEDIA: u32 = WM_APP + 5;
 const WM_DEVICE_LOST: u32 = WM_APP + 6;
 const WM_VOLUME: u32 = WM_APP + 7;
 const WM_AUDIO_DEVICE: u32 = WM_APP + 8;
-const WM_HEADSET: u32 = WM_APP + 9;
-const DBT_DEVNODES_CHANGED: usize = 0x0007; // a device was added or removed (any top-level window gets it)
 const VOLUME_MS: u32 = 1500;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1; // NINF_KEY
 // All timers are one-shot: the window procedure kills each one when it fires.
@@ -97,8 +93,6 @@ struct App {
     privacy: privacy::InUse,
     volume: Option<audio::Volume>,
     last_volume: Option<(u32, bool)>, // shown or current level and mute
-    headset: Option<HeadsetLink>,
-    battery: Option<Battery>, // the headset's, as shown
 }
 
 /// Status, what it is about, 5-hour limit left and its color, color of the Claude mark.
@@ -130,8 +124,6 @@ pub fn run() -> Result<()> {
         privacy: privacy::in_use(), // what was in use before we started is not news
         volume: None,
         last_volume: None,
-        headset: Some(HeadsetLink::start(hwnd, WM_HEADSET)),
-        battery: None,
     };
     app.volume = audio::Volume::new(hwnd, WM_VOLUME, WM_AUDIO_DEVICE).map_err(|e| log(format!("volume: {e}"))).ok();
     app.follow_audio();
@@ -271,7 +263,6 @@ impl App {
             self.island = Some(Island::new(self.hwnd, scale, WM_DEVICE_LOST)?);
             if let Some(island) = self.island.as_mut() {
                 let media = self.now_playing.as_ref();
-                island.set_headset(self.battery)?;
                 island.set_media(media, claude::now_ms())?;
                 island.set_art(media.and_then(|m| m.art.as_deref()), false)?;
             }
@@ -391,23 +382,6 @@ impl App {
                 SetTimer(Some(self.hwnd), PEEK_TIMER, ms, None);
             },
             Err(e) => log(format!("peek failed: {e}")),
-        }
-    }
-
-    /// The headset battery changed: the tab bar shows it; plugging in and running low peek.
-    fn headset_changed(&mut self) {
-        let new = self.headset.as_ref().and_then(HeadsetLink::current);
-        let old = std::mem::replace(&mut self.battery, new);
-        if let Some(Err(e)) = self.island.as_mut().map(|island| island.set_headset(new)) {
-            log(format!("headset draw failed: {e}"));
-        }
-        if old.is_some() != new.is_some() {
-            self.compact_line = None; // the Claude line's text gets more or less room
-            self.show_claude_state(false);
-        }
-        if let Some((text, charging)) = new.and_then(|now| headset::news(old, now)) {
-            let color = if charging { GREEN } else { RED };
-            self.peek(Tab::Music, PEEK_MS, |island| island.draw_peek(&text, Some(color)));
         }
     }
 
@@ -838,13 +812,6 @@ impl App {
                 return Ok(Some(LRESULT(1)));
             }
             WM_MEDIA => self.media_changed(),
-            WM_HEADSET => self.headset_changed(),
-            WM_DEVICECHANGE if wparam.0 == DBT_DEVNODES_CHANGED => {
-                if let Some(headset) = &self.headset {
-                    headset.rescan();
-                }
-                return Ok(None);
-            }
             WM_VOLUME => self.show_volume(wparam.0 as u32, lparam.0 != 0),
             WM_AUDIO_DEVICE => self.follow_audio(),
             WM_MOUSEWHEEL => self.media_command(Command::NextSession),

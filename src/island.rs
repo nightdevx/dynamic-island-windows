@@ -11,7 +11,6 @@ use windows_numerics::{Vector2, Vector3};
 
 use crate::{
     claude::{Limits, Session},
-    headset::Battery,
     media::{Art, Media},
     pages::{self, ART, ART_SOURCE, BAR, BUTTON, BUTTONS_Y, BUTTON_X, PAGE, TEXT, TIMES},
     render::{Align, Painter},
@@ -31,9 +30,9 @@ const GLOW_ALPHA: u32 = 0x16; // per stroke; where both overlap, near the edge, 
 const DAMPING: f32 = 0.78;
 const PERIOD_MS: f32 = 55.0;
 
-// Compact: a lead (Claude's mark, or the art), two lines of text, the line's own item on the
-// right (the 5-hour limit ring, or the equalizer), and at the right end the headset battery
-// when there is one. Both lines' text surfaces span from TEXT_X to the pill's end.
+// Compact: a lead (Claude's mark, or the art), two lines of text, and the line's own item on
+// the right (the 5-hour limit ring, or the equalizer). Both lines' text surfaces span from
+// TEXT_X to the pill's end.
 const MARK: f32 = 18.0;
 const TEXT_X: f32 = 38.0;
 const LINES: (f32, f32) = (COMPACT.0 - TEXT_X, COMPACT.1);
@@ -45,10 +44,8 @@ const BAR_W: f32 = 3.0;
 const BAR_H: f32 = 14.0;
 const BARS_W: f32 = BARS as f32 * (BAR_W + 3.0) - 3.0;
 
-/// Where the line's own item ends, from the pill's left: before the headset battery, if any.
-fn items_end(headset: bool) -> f32 {
-    COMPACT.0 - EDGE - if headset { pages::HEADSET_W + 4.0 } else { 0.0 }
-}
+/// Where the line's own item ends, from the pill's left.
+const ITEMS_END: f32 = COMPACT.0 - EDGE;
 
 // Microphone/camera in use: the closed pill grows this much and shows a dot at its right end.
 const PRIVACY_EXTRA: f32 = 18.0;
@@ -145,11 +142,7 @@ pub struct Island {
     line_surface: CompositionDrawingSurface,
     music_line: ContainerVisual,
     title_surface: CompositionDrawingSurface,
-    music_text: (String, String), // title and artist, for a redraw when the layout changes
     bars: Vec<SpriteVisual>,
-    headset: SpriteVisual,
-    headset_surface: CompositionDrawingSurface,
-    battery: Option<Battery>,
     accent: CompositionColorBrush, // equalizer and progress, from the art
     glow: ShapeVisual,
     glow_brushes: [CompositionColorBrush; 2], // the two strokes, same faint color
@@ -159,7 +152,6 @@ pub struct Island {
     peek_art: SpriteVisual,
     peek_surface: CompositionDrawingSurface,
     expanded: ContainerVisual,
-    header_surface: CompositionDrawingSurface,
     highlight: ShapeVisual,
     pages: [ContainerVisual; 2],
     page_surfaces: [CompositionDrawingSurface; 2],
@@ -315,8 +307,8 @@ impl Island {
         music_line.Children()?.InsertAtTop(&sprite(&surface_brush(&title_surface)?, at(TEXT_X, 0.0), LINES)?)?;
         let mut bars = Vec::new();
         for i in 0..BARS {
-            // Placed by draw_music_line, which knows whether the headset takes the right end.
-            let bar = sprite(&accent_brush, at(0.0, (COMPACT.1 - BAR_H) / 2.0), (BAR_W, BAR_H))?;
+            let x = ITEMS_END - BARS_W + i as f32 * (BAR_W + 3.0);
+            let bar = sprite(&accent_brush, at(x, (COMPACT.1 - BAR_H) / 2.0), (BAR_W, BAR_H))?;
             // Grow from the bottom.
             bar.SetCenterPoint(Vector3 { X: 0.0, Y: px((0.0, BAR_H)).Y, Z: 0.0 })?;
             bar.SetScale(Vector3 { X: 1.0, Y: bar_height(i, 0), Z: 1.0 })?;
@@ -324,11 +316,6 @@ impl Island {
             bars.push(bar);
         }
         compact.Children()?.InsertAtTop(&music_line)?;
-        // The headset battery, shared by both lines.
-        let headset_surface = painter.surface((pages::HEADSET_W, COMPACT.1))?;
-        let headset = sprite(&surface_brush(&headset_surface)?, at(COMPACT.0 - EDGE - pages::HEADSET_W, 0.0), (pages::HEADSET_W, COMPACT.1))?;
-        headset.SetOpacity(0.0)?;
-        compact.Children()?.InsertAtTop(&headset)?;
         content.Children()?.InsertAtTop(&compact)?;
 
         // Peek: one line, with the art when it is about music.
@@ -359,6 +346,12 @@ impl Island {
         expanded.Children()?.InsertAtTop(&highlight)?;
 
         let header_surface = painter.surface((EXPANDED.0, PAGE_Y))?;
+        painter.draw(&header_surface, |c| {
+            for (tab, label) in [(Tab::Music, "Müzik"), (Tab::Claude, "Claude")] {
+                c.text(label, (tab_left(tab), TAB_Y, TAB_W, TAB_H), 12.5, true, TEXT, Align::Center)?;
+            }
+            Ok(())
+        })?;
         expanded.Children()?.InsertAtTop(&sprite(&surface_brush(&header_surface)?, at(0.0, 0.0), (EXPANDED.0, PAGE_Y))?)?;
         let expanded_dot = dot((EXPANDED.0 - 24.0, TAB_Y + TAB_H / 2.0))?;
         expanded.Children()?.InsertAtTop(&expanded_dot)?;
@@ -405,7 +398,7 @@ impl Island {
         spring.SetPeriod(ms(PERIOD_MS as i64))?;
         let easing = compositor.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?;
 
-        let mut island = Self {
+        let island = Self {
             scale,
             window,
             compositor,
@@ -422,11 +415,7 @@ impl Island {
             line_surface,
             music_line,
             title_surface,
-            music_text: (String::new(), String::new()),
             bars,
-            headset,
-            headset_surface,
-            battery: None,
             accent,
             glow,
             glow_brushes,
@@ -436,7 +425,6 @@ impl Island {
             peek_art,
             peek_surface,
             expanded,
-            header_surface,
             highlight,
             pages,
             page_surfaces,
@@ -454,49 +442,7 @@ impl Island {
         };
         island.set_media(None, 0)?;
         island.set_art(None, false)?;
-        island.draw_header()?;
         Ok(island)
-    }
-
-    /// The tab bar's labels, and the headset battery left of them when there is one.
-    fn draw_header(&self) -> Result<()> {
-        self.painter.draw(&self.header_surface, |c| {
-            for (tab, label) in [(Tab::Music, "Müzik"), (Tab::Claude, "Claude")] {
-                c.text(label, (tab_left(tab), TAB_Y, TAB_W, TAB_H), 12.5, true, TEXT, Align::Center)?;
-            }
-            match self.battery {
-                Some(battery) => pages::headset(c, (14.0, TAB_Y, TAB_H), battery),
-                None => Ok(()),
-            }
-        })
-    }
-
-    /// The headset battery, at the right end of the closed pill and in the tab bar. The
-    /// window redraws the Claude line after it (`draw_compact`), whose room changes with it.
-    pub fn set_headset(&mut self, battery: Option<Battery>) -> Result<()> {
-        let moved = battery.is_some() != self.battery.is_some();
-        self.battery = battery;
-        self.draw_header()?;
-        if let Some(battery) = battery {
-            self.painter.draw(&self.headset_surface, |c| pages::headset(c, (0.0, 0.0, COMPACT.1), battery))?;
-        }
-        self.crossfade(&self.headset.cast()?, battery.is_some(), 200)?;
-        if moved {
-            self.draw_music_line()?;
-        }
-        Ok(())
-    }
-
-    /// The music line's text and equalizer, laid out around the headset battery.
-    fn draw_music_line(&self) -> Result<()> {
-        let end = items_end(self.battery.is_some());
-        for (i, bar) in self.bars.iter().enumerate() {
-            let p = self.painter.px((end - BARS_W + i as f32 * (BAR_W + 3.0), (COMPACT.1 - BAR_H) / 2.0));
-            bar.SetOffset(Vector3 { X: p.X, Y: p.Y, Z: 0.0 })?;
-        }
-        let (title, detail) = &self.music_text;
-        let w = end - BARS_W - GAP - TEXT_X;
-        self.painter.draw(&self.title_surface, |c| pages::two_lines(c, title, detail, w, COMPACT.1))
     }
 
     pub fn tab(&self) -> Tab {
@@ -656,17 +602,18 @@ impl Island {
     }
 
     /// Texts and buttons for what plays (or nothing). Called when the player reports a change.
-    pub fn set_media(&mut self, media: Option<&Media>, now_ms: u64) -> Result<()> {
+    pub fn set_media(&self, media: Option<&Media>, now_ms: u64) -> Result<()> {
         self.painter.draw(&self.page_surfaces[Tab::Music.index()], |c| pages::music_page(c, media))?;
         // Title over artist; without a title the player's name leads, and without an artist
         // the player's name goes under the title.
-        self.music_text = match media {
-            Some(m) if m.title.is_empty() => (m.app.clone(), m.artist.clone()),
-            Some(m) if m.artist.is_empty() => (m.title.clone(), m.app.clone()),
-            Some(m) => (m.title.clone(), m.artist.clone()),
-            None => Default::default(),
+        let (title, detail) = match media {
+            Some(m) if m.title.is_empty() => (m.app.as_str(), m.artist.as_str()),
+            Some(m) if m.artist.is_empty() => (m.title.as_str(), m.app.as_str()),
+            Some(m) => (m.title.as_str(), m.artist.as_str()),
+            None => ("", ""),
         };
-        self.draw_music_line()?;
+        let w = ITEMS_END - BARS_W - GAP - TEXT_X;
+        self.painter.draw(&self.title_surface, |c| pages::two_lines(c, title, detail, w, COMPACT.1))?;
         self.draw_times(media, now_ms)?;
         let enabled = |f: fn(&Media) -> bool| media.is_some_and(f);
         let glyphs = [
@@ -797,7 +744,7 @@ impl Island {
     pub fn draw_compact(&self, status: &str, detail: &str, limit: Option<(f32, u32)>, mark_color: u32) -> Result<()> {
         self.painter.draw(&self.mark_surface, |c| c.spark((MARK / 2.0, MARK / 2.0), MARK / 2.0, mark_color))?;
         // In the surface's coordinates, which start at TEXT_X.
-        let end = items_end(self.battery.is_some()) - TEXT_X;
+        let end = ITEMS_END - TEXT_X;
         self.painter.draw(&self.line_surface, |c| {
             let text_w = if limit.is_some() { end - pages::RING - GAP } else { end };
             pages::two_lines(c, status, detail, text_w, COMPACT.1)?;
@@ -910,16 +857,11 @@ mod tests {
 
     #[test]
     fn closed_pill_leaves_room_for_text() {
-        for headset in [false, true] {
-            let end = items_end(headset);
-            // The narrowest text: the Claude line next to the ring, with the headset shown.
-            assert!(end - pages::RING - GAP - TEXT_X >= 150.0, "headset {headset}: text squeezed");
-            assert!(end - BARS_W - GAP - TEXT_X >= 150.0);
-        }
-        // The headset sits between the line's items and the pill's rounded end.
-        assert!(items_end(true) + 4.0 + pages::HEADSET_W <= COMPACT.0 - EDGE + 0.01);
-        // The privacy dot clears the headset.
+        // The Claude line's text next to the ring, the music line's next to the equalizer.
+        assert!(ITEMS_END - pages::RING - GAP - TEXT_X >= 150.0, "text squeezed by the ring");
+        assert!(ITEMS_END - BARS_W - GAP - TEXT_X >= 150.0, "text squeezed by the equalizer");
+        // The privacy dot clears the line's items.
         let dot_left = COMPACT.0 + PRIVACY_EXTRA - COMPACT.1 / 2.0 - DOT / 2.0;
-        assert!(dot_left >= COMPACT.0 - EDGE + 4.0);
+        assert!(dot_left >= ITEMS_END + 4.0);
     }
 }
