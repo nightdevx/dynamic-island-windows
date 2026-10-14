@@ -106,7 +106,9 @@ pub enum Hit {
     Repeat,
     Seek(f64),        // 0..1 of the track
     Session(usize),   // row on the Claude page
-    ShelfItem(usize), // a file on the shelf
+    ShelfItem(usize), // a file on the shelf, by its index in the list
+    Segment(usize),   // the shelf's list: files or screenshots
+    SelectAll,
     ClearShelf,
 }
 
@@ -164,7 +166,7 @@ pub struct Island {
     progress: SpriteVisual,
     buttons: [SpriteVisual; 6], // previous, play, pause, next, shuffle, repeat
     button_surfaces: [CompositionDrawingSurface; 6],
-    shelf_items: usize, // files on the shelf page, for hit testing
+    shelf_view: (usize, usize, usize), // the shelf page's first item, items on screen, all items
     privacy_brush: CompositionColorBrush,
     privacy_dots: [SpriteVisual; 2], // closed pill, tab bar
     extra: f32,                      // width the closed pill gives the privacy dot, DIPs
@@ -439,7 +441,7 @@ impl Island {
             progress,
             buttons,
             button_surfaces,
-            shelf_items: 0,
+            shelf_view: (0, 0, 0),
             privacy_brush,
             privacy_dots: [compact_dot, expanded_dot],
             extra: 0.0,
@@ -449,7 +451,7 @@ impl Island {
         };
         island.set_media(None, 0)?;
         island.set_art(None, false)?;
-        island.draw_shelf(&[], false)?;
+        island.draw_shelf(&shelf::Shelf::default(), 0, [0, 0], false)?;
         Ok(island)
     }
 
@@ -581,11 +583,17 @@ impl Island {
                 return (y >= pages::SESSIONS_Y && (12.0..PAGE.0 - 12.0).contains(&x)).then_some(Hit::Session(row as usize));
             }
             Tab::Shelf => {
-                if self.shelf_items > 0 && inside(pages::SHELF_CLEAR) {
+                if let Some(list) = pages::SEGMENTS.iter().position(|&s| inside(s)) {
+                    return Some(Hit::Segment(list));
+                }
+                let (offset, shown, total) = self.shelf_view;
+                if total > 0 && inside(pages::SELECT_ALL) {
+                    return Some(Hit::SelectAll);
+                }
+                if total > 0 && inside(pages::SHELF_CLEAR) {
                     return Some(Hit::ClearShelf);
                 }
-                let shown = pages::shelf_shown(self.shelf_items);
-                return (0..shown).find(|&i| inside(pages::shelf_tile(i, self.shelf_items))).map(Hit::ShelfItem);
+                return (0..shown).find(|&slot| inside(pages::shelf_tile(slot, shown))).map(|slot| Hit::ShelfItem(offset + slot));
             }
             Tab::Music => {}
         }
@@ -737,11 +745,11 @@ impl Island {
         Ok(())
     }
 
-    /// The shelf page: the files on it, or where to drop them; `dropping` while files are
-    /// dragged over the island.
-    pub fn draw_shelf(&mut self, items: &[shelf::Item], dropping: bool) -> Result<()> {
-        self.shelf_items = items.len();
-        self.painter.draw(&self.page_surfaces[Tab::Shelf.index()], |c| pages::shelf_page(c, items, dropping))
+    /// The shelf page with `shelf`, the list picked by `list` (0 files, 1 screenshots);
+    /// `counts` are both lists' sizes, `dropping` while files are dragged over the island.
+    pub fn draw_shelf(&mut self, shelf: &shelf::Shelf, list: usize, counts: [usize; 2], dropping: bool) -> Result<()> {
+        self.shelf_view = (shelf.offset, shelf.visible().count(), shelf.items.len());
+        self.painter.draw(&self.page_surfaces[Tab::Shelf.index()], |c| pages::shelf_page(c, shelf, list, counts, dropping))
     }
 
     pub fn draw_claude(&self, sessions: &[Session], limits: &Limits, now: u64) -> Result<()> {

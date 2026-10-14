@@ -60,6 +60,11 @@ const RAISE_DELAY_MS: u32 = 100;
 const PEEK_TIMER: usize = 3;
 const MINUTE_TIMER: usize = 4; // only while the Claude tab is on screen: reset countdowns
 const SECOND_TIMER: usize = 5; // only while the music page is on screen and playing: elapsed time
+const SHOT_TIMER: usize = 6; // after the screenshots folder changes
+const SHOT_DELAY_MS: u32 = 400;
+// The shelf's two lists.
+const FILES: usize = 0;
+const SCREENSHOTS: usize = 1;
 const TRAY_ID: u32 = 1;
 const ID_AUTOSTART: usize = 1;
 const ID_SETTINGS: usize = 2;
@@ -100,8 +105,10 @@ struct App {
     privacy: privacy::InUse,
     volume: Option<audio::Volume>,
     last_volume: Option<(u32, bool)>, // shown or current level and mute
-    shelf: Shelf,
-    dropping: bool, // files are being dragged over the island
+    shelves: [Shelf; 2], // FILES dropped on the island, SCREENSHOTS taken
+    list: usize,         // which of them the shelf page shows
+    dropping: bool,      // files are being dragged over the island
+    shots_since: std::time::SystemTime, // screenshots after this are new
 }
 
 /// Status, what it is about, 5-hour limit left and its color, color of the Claude mark.
@@ -133,9 +140,15 @@ pub fn run() -> Result<()> {
         privacy: privacy::in_use(), // what was in use before we started is not news
         volume: None,
         last_volume: None,
-        shelf: Shelf::default(),
+        shelves: Default::default(),
+        list: FILES,
         dropping: false,
+        // The last day's screenshots are on the shelf from the start.
+        shots_since: std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600),
     };
+    if app.settings.screenshots {
+        app.add_screenshots(false);
+    }
     // Files dragged onto the island land on the shelf.
     let dropped = unsafe {
         OleInitialize(None).and_then(|_| RegisterDragDrop(hwnd, &IDropTarget::from(DropTarget::new(hwnd, WM_DRAG_FILES))))
@@ -186,8 +199,11 @@ type Watch = (HANDLE, Box<dyn Fn()>, OnChange);
 /// Sleeps until there is input or something watched changes (settings and Claude Code state
 /// folders, the microphone/camera records); nothing runs while idle.
 fn message_loop() -> Result<()> {
-    let folders: [(Option<std::path::PathBuf>, OnChange); 2] =
-        [(settings::dir(), App::reload_settings), (claude::dir(), |app| app.reload_claude(true))];
+    let folders: [(Option<std::path::PathBuf>, OnChange); 3] = [
+        (settings::dir(), App::reload_settings),
+        (claude::dir(), |app| app.reload_claude(true)),
+        (shelf::screenshots_dir(), App::screenshots_changed),
+    ];
     let mut watches: Vec<Watch> = folders
         .into_iter()
         .filter_map(|(dir, action)| {
@@ -235,6 +251,7 @@ fn create_window() -> Result<HWND> {
             hInstance: instance.into(),
             lpszClassName: class,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            style: CS_DBLCLKS, // double click opens a shelf item
             ..Default::default()
         };
         if RegisterClassW(&wc) == 0 {
@@ -507,7 +524,7 @@ impl App {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), MINUTE_TIMER);
             }
-            if tab == Tab::Shelf && self.shelf.prune() {
+            if tab == Tab::Shelf {
                 self.draw_shelf();
             }
             self.update_live();
@@ -515,8 +532,17 @@ impl App {
         Ok(())
     }
 
+    /// Draws the shelf page if it is on screen (thumbnails are made only for what shows).
     fn draw_shelf(&mut self) {
-        if let Some(Err(e)) = self.island.as_mut().map(|island| island.draw_shelf(&self.shelf.items, self.dropping)) {
+        if self.view != View::Expanded || self.tab() != Some(Tab::Shelf) {
+            return;
+        }
+        let list = &mut self.shelves[self.list];
+        list.prune();
+        list.load_icons((crate::pages::SHELF_ICON * self.scale).round() as u32);
+        let counts = [self.shelves[0].items.len(), self.shelves[1].items.len()];
+        let drawn = self.island.as_mut().map(|island| island.draw_shelf(&self.shelves[self.list], self.list, counts, self.dropping));
+        if let Some(Err(e)) = drawn {
             log(format!("shelf draw failed: {e}"));
         }
     }
@@ -530,6 +556,7 @@ impl App {
         self.dropping = what == 1;
         match what {
             1 => {
+                self.list = FILES;
                 let opened = self.island.as_mut().map_or(Ok(()), |island| island.set_tab(Tab::Shelf)).and_then(|_| self.set_view(View::Expanded));
                 if let Err(e) = opened {
                     log(format!("open for a drop failed: {e}"));
@@ -538,7 +565,7 @@ impl App {
             2 => {
                 let files = shelf::take_dropped();
                 log(format!("shelf: {} file(s) dropped", files.len()));
-                self.shelf.add(files, (crate::pages::SHELF_ICON * self.scale).round() as u32);
+                self.shelves[FILES].add(files, false);
             }
             _ => unsafe {
                 SetTimer(Some(self.hwnd), LEAVE_TIMER, LEAVE_MS, None);
@@ -547,14 +574,46 @@ impl App {
         self.draw_shelf();
     }
 
-    /// The shelf file under a press, if the shelf page is open there.
-    fn shelf_item_at(&self, lparam: LPARAM) -> Option<(std::path::PathBuf, POINT)> {
+    /// The screenshots folder changed; it is read once the burst of changes is over (a new
+    /// file is written in steps).
+    fn screenshots_changed(&mut self) {
+        if self.settings.screenshots {
+            unsafe { SetTimer(Some(self.hwnd), SHOT_TIMER, SHOT_DELAY_MS, None) };
+        }
+    }
+
+    /// New screenshots go to the front of their list and, as `news`, peek when the shelf is
+    /// not open.
+    fn add_screenshots(&mut self, news: bool) {
+        let Some(dir) = shelf::screenshots_dir() else { return };
+        // Newer than the last look, give or take a few seconds; a file twice is taken once.
+        let started = std::time::SystemTime::now();
+        let new = shelf::screenshots_since(&dir, self.shots_since);
+        self.shots_since = started - std::time::Duration::from_secs(5);
+        let added = self.shelves[SCREENSHOTS].add_named(new, true);
+        if added == 0 || !news {
+            return;
+        }
+        log(format!("shelf: {added} new screenshot(s)"));
+        self.list = SCREENSHOTS;
+        if self.view == View::Expanded && self.tab() == Some(Tab::Shelf) {
+            self.draw_shelf();
+        } else {
+            let text = if added == 1 { "Ekran görüntüsü rafta".to_string() } else { format!("{added} ekran görüntüsü rafta") };
+            self.peek(Tab::Shelf, PEEK_MS, |island| island.draw_peek(&text, Some(0xFF0A84FF)));
+        }
+    }
+
+    /// The shelf item under a press, if the shelf page is open there: its index, what a drag
+    /// from it takes, and the point in window pixels.
+    fn shelf_item_at(&self, lparam: LPARAM) -> Option<(usize, Vec<std::path::PathBuf>, POINT)> {
         if self.view != View::Expanded || self.tab() != Some(Tab::Shelf) {
             return None;
         }
         let (x, y) = ((lparam.0 & 0xFFFF) as i16 as i32, ((lparam.0 >> 16) & 0xFFFF) as i16 as i32);
         let Some(Hit::ShelfItem(i)) = self.island.as_ref()?.hit(x, y) else { return None };
-        Some((self.shelf.items.get(i)?.path.clone(), POINT { x, y }))
+        let dragged = self.shelves[self.list].dragged(i);
+        (!dragged.is_empty()).then_some((i, dragged, POINT { x, y }))
     }
 
     /// Clicks outside this rectangle fall through to the window below.
@@ -646,6 +705,7 @@ impl App {
         if view == View::Expanded && self.tab() == Some(Tab::Claude) {
             self.reload_claude(true);
         } else {
+            self.draw_shelf(); // when it is the page that opens
             self.update_live();
         }
         Ok(())
@@ -795,13 +855,29 @@ impl App {
                     }
                 }
             }
-            Hit::ShelfItem(_) => {} // pressed files are dragged or opened before APP is borrowed
+            Hit::ShelfItem(_) => {} // pressed items are dragged or selected before APP is borrowed
+            Hit::Segment(list) => {
+                self.list = list;
+                self.draw_shelf();
+            }
+            Hit::SelectAll => {
+                self.shelves[self.list].select_all();
+                self.draw_shelf();
+            }
             Hit::ClearShelf => {
-                self.shelf.items.clear();
+                self.shelves[self.list].clear();
                 self.draw_shelf();
             }
         }
         Ok(())
+    }
+
+    /// A click on a shelf item (no drag) selects it or takes it out of the selection.
+    fn toggle_shelf_item(&mut self, i: usize) {
+        if let Some(item) = self.shelves[self.list].items.get_mut(i) {
+            item.selected = !item.selected;
+            self.draw_shelf();
+        }
     }
 
     fn handle(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<Option<LRESULT>> {
@@ -821,7 +897,9 @@ impl App {
                 unsafe { KillTimer(Some(self.hwnd), LEAVE_TIMER).ok() };
             }
             WM_MOUSEHOVER => self.expand()?,
-            WM_LBUTTONDOWN => {
+            // A fast second click comes as a double click (the class asks for them, for the
+            // shelf); anywhere else it is just another click.
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                 let (x, y) = ((lparam.0 & 0xFFFF) as i16 as i32, ((lparam.0 >> 16) & 0xFFFF) as i16 as i32);
                 let hit = self.island.as_ref().and_then(|i| i.hit(x, y));
                 match (self.view, hit) {
@@ -834,6 +912,7 @@ impl App {
                 self.tracking = false;
                 unsafe { SetTimer(Some(self.hwnd), LEAVE_TIMER, LEAVE_MS, None) };
             }
+            WM_TIMER if wparam.0 == SHOT_TIMER => self.add_screenshots(true),
             WM_TIMER if wparam.0 == LEAVE_TIMER => self.set_view(View::Compact)?,
             WM_TIMER if wparam.0 == PEEK_TIMER && self.view == View::Peek => self.set_view(View::Compact)?,
             WM_TIMER if wparam.0 == MINUTE_TIMER && self.view == View::Expanded => self.reload_claude(true),
@@ -883,6 +962,12 @@ impl App {
             WM_VOLUME => self.show_volume(wparam.0 as u32, lparam.0 != 0),
             WM_DRAG_FILES => self.files_dragged(wparam.0),
             WM_AUDIO_DEVICE => self.follow_audio(),
+            // On the open shelf the wheel scrolls its row; elsewhere it switches players.
+            WM_MOUSEWHEEL if self.view == View::Expanded && self.tab() == Some(Tab::Shelf) => {
+                let delta = (wparam.0 >> 16) as u16 as i16;
+                self.shelves[self.list].scroll(if delta < 0 { 1 } else { -1 });
+                self.draw_shelf();
+            }
             WM_MOUSEWHEEL => self.media_command(Command::NextSession),
             WM_COMMAND => match wparam.0 & 0xFFFF {
                 ID_PLAY_PAUSE => self.media_command(Command::TogglePlay),
@@ -934,12 +1019,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         return LRESULT(0);
     }
-    // A file on the shelf: dragging it out runs a modal loop that dispatches our messages,
+    // An item on the shelf: dragging it out runs a modal loop that dispatches our messages,
     // so it happens with APP free.
-    if msg == WM_LBUTTONDOWN {
+    if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK {
         let pressed = APP.with(|cell| cell.try_borrow().ok()?.as_ref()?.shelf_item_at(lparam));
-        if let Some((path, point)) = pressed {
-            press_shelf_file(hwnd, &path, point);
+        if let Some((index, dragged, point)) = pressed {
+            press_shelf_item(hwnd, index, &dragged, point, msg == WM_LBUTTONDBLCLK);
             return LRESULT(0);
         }
     }
@@ -1001,22 +1086,38 @@ fn foreground_title() -> String {
     String::from_utf16_lossy(&buffer[..len])
 }
 
-/// A press on a shelf file: a drag takes it elsewhere (and off the shelf once it lands), a
-/// click opens it.
-fn press_shelf_file(hwnd: HWND, path: &std::path::Path, mut point: POINT) {
-    unsafe {
-        let _ = ClientToScreen(hwnd, &mut point);
-        if !DragDetect(hwnd, point).as_bool() {
-            ShellExecuteW(Some(hwnd), w!("open"), &HSTRING::from(path), None, None, SW_SHOWNORMAL);
-            return;
-        }
-    }
-    if shelf::drag_out(hwnd, path) {
+/// A press on shelf item `index`: a drag takes `dragged` (the selection, or just the item)
+/// elsewhere and off the shelf once it lands; a click selects the item or takes it out of
+/// the selection; a double click opens it (and leaves the selection as it was).
+fn press_shelf_item(hwnd: HWND, index: usize, dragged: &[std::path::PathBuf], mut point: POINT, double: bool) {
+    let with_app = |f: &mut dyn FnMut(&mut App)| {
         APP.with(|cell| {
             if let Some(app) = cell.try_borrow_mut().ok().as_deref_mut().and_then(Option::as_mut) {
-                app.shelf.items.retain(|item| item.path != path);
-                app.draw_shelf();
+                f(app);
             }
+        })
+    };
+    if double {
+        let mut path = None;
+        with_app(&mut |app| {
+            app.toggle_shelf_item(index); // undo the first click's toggle
+            path = app.shelves[app.list].items.get(index).map(|item| item.path.clone());
+        });
+        if let Some(path) = path {
+            unsafe { ShellExecuteW(Some(hwnd), w!("open"), &HSTRING::from(path.as_path()), None, None, SW_SHOWNORMAL) };
+        }
+        return;
+    }
+    let dragging = unsafe {
+        let _ = ClientToScreen(hwnd, &mut point);
+        DragDetect(hwnd, point).as_bool()
+    };
+    if !dragging {
+        with_app(&mut |app| app.toggle_shelf_item(index));
+    } else if shelf::drag_out(hwnd, dragged) {
+        with_app(&mut |app| {
+            app.shelves[app.list].remove(dragged);
+            app.draw_shelf();
         });
     }
 }

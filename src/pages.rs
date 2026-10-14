@@ -5,6 +5,7 @@ use windows::core::Result;
 
 use crate::{
     claude::{Limits, Session, State, Window},
+    shelf::{Shelf, VISIBLE},
     media::{Art, Media},
     render::{Align, Canvas},
 };
@@ -71,58 +72,80 @@ pub fn button(c: &Canvas, glyph: char, enabled: bool) -> Result<()> {
     c.icon(glyph, (0.0, 0.0, BUTTON, BUTTON), size, if enabled { TEXT } else { DISABLED })
 }
 
-// Shelf page: a row of up to five file tiles, a hint and "Temizle" under them.
+// Shelf page: two lists (files dropped here, new screenshots) picked with the segments on
+// top, a row of up to five tiles, and a line of status and actions under them.
 const TILE: (f32, f32) = (68.0, 72.0);
-const TILES: usize = 5;
 pub const SHELF_ICON: f32 = 44.0;
 const DROP: u32 = 0xFF0A84FF;
-/// "Temizle", in the page's lower right.
-pub const SHELF_CLEAR: (f32, f32, f32, f32) = (PAGE.0 - 90.0, PAGE.1 - 30.0, 72.0, 22.0);
+const SELECTED: u32 = 0x400A84FF;
+const ROW_Y: f32 = 28.0;
+/// The two lists' segments, top left: files, screenshots.
+pub const SEGMENTS: [(f32, f32, f32, f32); 2] = [(14.0, 0.0, 96.0, 22.0), (114.0, 0.0, 150.0, 22.0)];
+/// "Tümünü seç", top right.
+pub const SELECT_ALL: (f32, f32, f32, f32) = (PAGE.0 - 112.0, 0.0, 98.0, 22.0);
+/// "Temizle" (or "Kaldır" for a selection), bottom right.
+pub const SHELF_CLEAR: (f32, f32, f32, f32) = (PAGE.0 - 90.0, PAGE.1 - 24.0, 76.0, 22.0);
 
-/// How many tiles show a file: all of them up to five, else four and a "+N" tile.
-pub fn shelf_shown(count: usize) -> usize {
-    if count > TILES {
-        TILES - 1
-    } else {
-        count
+/// Where tile `slot` of `shown` on screen sits: a row centered on the page.
+pub fn shelf_tile(slot: usize, shown: usize) -> (f32, f32, f32, f32) {
+    let left = (PAGE.0 - shown as f32 * TILE.0) / 2.0;
+    (left + slot as f32 * TILE.0, ROW_Y, TILE.0, TILE.1)
+}
+
+/// The shelf page showing `list` (0 files, 1 screenshots); `counts` are both lists' sizes.
+/// `dropping` while files are dragged over the island.
+pub fn shelf_page(c: &Canvas, shelf: &Shelf, list: usize, counts: [usize; 2], dropping: bool) -> Result<()> {
+    for (i, (label, count)) in [("Dosyalar", counts[0]), ("Ekran görüntüleri", counts[1])].into_iter().enumerate() {
+        let bounds = SEGMENTS[i];
+        if i == list {
+            c.round_rect(bounds, bounds.3 / 2.0, FAINT)?;
+        }
+        let text = if count > 0 { format!("{label} {count}") } else { label.to_string() };
+        c.text(&text, bounds, 11.5, true, if i == list { TEXT } else { DIM }, Align::Center)?;
     }
-}
-
-/// Where tile `i` of a shelf with `count` files sits: a row centered on the page.
-pub fn shelf_tile(i: usize, count: usize) -> (f32, f32, f32, f32) {
-    let tiles = count.min(TILES);
-    let left = (PAGE.0 - tiles as f32 * TILE.0) / 2.0;
-    (left + i as f32 * TILE.0, 10.0, TILE.0, TILE.1)
-}
-
-/// The files on the shelf, or where to drop them. `dropping` while files are dragged over.
-pub fn shelf_page(c: &Canvas, items: &[crate::shelf::Item], dropping: bool) -> Result<()> {
     if dropping {
-        c.outline((10.0, 4.0, PAGE.0 - 20.0, PAGE.1 - 10.0), 14.0, 1.5, DROP, true)?;
+        c.outline((10.0, ROW_Y - 4.0, PAGE.0 - 20.0, PAGE.1 - ROW_Y), 14.0, 1.5, DROP, true)?;
     }
-    if items.is_empty() {
-        let (title, color) = if dropping { ("Bırakın", TEXT) } else { ("Dosyaları buraya sürükleyin", DIM) };
-        c.icon('\u{E896}', (0.0, 18.0, PAGE.0, 32.0), 22.0, if dropping { DROP } else { DIM })?; // Download
-        c.text(title, (18.0, 54.0, PAGE.0 - 36.0, 22.0), 13.5, true, color, Align::Center)?;
-        return c.text("Rafta beklerler; sonra istediğiniz yere sürükleyin", (18.0, 76.0, PAGE.0 - 36.0, 18.0), 11.0, false, 0xFF636366, Align::Center);
+    if shelf.items.is_empty() {
+        let (glyph, title, hint) = match (list, dropping) {
+            (1, false) => ('\u{E722}', "Ekran görüntüsü yok", "Win + PrtScn ya da Ekran Alıntısı Aracı ile alınanlar burada görünür"),
+            (_, true) => ('\u{E896}', "Bırakın", "Rafta beklerler; sonra istediğiniz yere sürükleyin"),
+            _ => ('\u{E896}', "Dosyaları buraya sürükleyin", "Rafta beklerler; sonra istediğiniz yere sürükleyin"),
+        };
+        c.icon(glyph, (0.0, ROW_Y + 6.0, PAGE.0, 30.0), 22.0, if dropping { DROP } else { DIM })?; // Camera / Download
+        c.text(title, (18.0, ROW_Y + 40.0, PAGE.0 - 36.0, 22.0), 13.5, true, if dropping { TEXT } else { DIM }, Align::Center)?;
+        return c.text(hint, (18.0, ROW_Y + 62.0, PAGE.0 - 36.0, 18.0), 11.0, false, 0xFF636366, Align::Center);
     }
-    let shown = shelf_shown(items.len());
+    let shown = shelf.visible().count();
     let icon_at = |(x, y, w, _): (f32, f32, f32, f32)| (x + (w - SHELF_ICON) / 2.0, y, SHELF_ICON, SHELF_ICON);
-    for (i, item) in items.iter().take(shown).enumerate() {
-        let tile = shelf_tile(i, items.len());
-        match &item.icon {
-            Some(icon) => c.image(&icon.pixels, icon.size, icon_at(tile))?,
-            None => c.icon('\u{E8A5}', icon_at(tile), 28.0, DIM)?, // Document
+    for (slot, (_, item)) in shelf.visible().enumerate() {
+        let tile = shelf_tile(slot, shown);
+        if item.selected {
+            c.round_rect((tile.0 + 2.0, tile.1 - 4.0, tile.2 - 4.0, tile.3 + 4.0), 10.0, SELECTED)?;
+        }
+        let icon = icon_at(tile);
+        match item.icon.as_ref().and_then(Option::as_ref) {
+            Some(art) => c.image(&art.pixels, art.size, icon)?,
+            None => c.icon('\u{E8A5}', icon, 28.0, DIM)?, // Document
         }
         c.text(&item.name, (tile.0 + 3.0, tile.1 + SHELF_ICON + 6.0, tile.2 - 6.0, 16.0), 10.5, false, TEXT, Align::Center)?;
+        if item.selected {
+            let (cx, cy) = (icon.0 + icon.2 - 3.0, icon.1 + 3.0);
+            c.circle((cx, cy), 7.5, DROP)?;
+            c.icon('\u{E73E}', (cx - 7.5, cy - 7.5, 15.0, 15.0), 9.0, TEXT)?; // CheckMark
+        }
     }
-    if items.len() > shown {
-        let tile = shelf_tile(shown, items.len());
-        c.round_rect(icon_at(tile), 10.0, FAINT)?;
-        c.text(&format!("+{}", items.len() - shown), icon_at(tile), 14.0, true, TEXT, Align::Center)?;
-    }
-    c.text("Tıkla: aç · Sürükle: başka yere bırak", (18.0, SHELF_CLEAR.1, 240.0, SHELF_CLEAR.3), 11.0, false, 0xFF636366, Align::Left)?;
-    c.text("Temizle", SHELF_CLEAR, 11.5, true, DIM, Align::Right)
+    let (selected, total) = (shelf.selected(), shelf.items.len());
+    let status = if selected > 0 {
+        format!("{selected} seçili · sürükleyip bırakın")
+    } else if total > VISIBLE {
+        format!("{}–{} / {total} · tekerlekle kaydırın", shelf.offset + 1, shelf.offset + shown)
+    } else {
+        "Tıkla: seç · Çift tıkla: aç · Sürükle: bırak".to_string()
+    };
+    c.text(&status, (18.0, SHELF_CLEAR.1, 268.0, SHELF_CLEAR.3), 11.0, false, 0xFF636366, Align::Left)?;
+    c.text(if selected == total { "Seçimi kaldır" } else { "Tümünü seç" }, SELECT_ALL, 11.5, true, DIM, Align::Right)?;
+    c.text(if selected > 0 { "Kaldır" } else { "Temizle" }, SHELF_CLEAR, 11.5, true, DIM, Align::Right)
 }
 
 /// The closed island's two lines: a bold title and a dim line under it, `w` wide.
@@ -363,15 +386,13 @@ mod tests {
 
     #[test]
     fn shelf_tiles_are_centered_and_fit() {
-        for count in 1..=8 {
-            let tiles = shelf_shown(count) + usize::from(count > shelf_shown(count));
-            let first = shelf_tile(0, count);
-            let last = shelf_tile(tiles - 1, count);
-            assert!((first.0 - (PAGE.0 - (last.0 + last.2))).abs() < 0.01, "{count} files: row not centered");
-            assert!(first.0 >= 18.0 && last.1 + last.3 <= SHELF_CLEAR.1, "{count} files: row does not fit");
+        for shown in 1..=VISIBLE {
+            let (first, last) = (shelf_tile(0, shown), shelf_tile(shown - 1, shown));
+            assert!((first.0 - (PAGE.0 - (last.0 + last.2))).abs() < 0.01, "{shown} tiles: row not centered");
+            // Between the segments on top and the status line, highlight included.
+            assert!(first.0 >= 18.0 && first.1 - 4.0 >= SEGMENTS[0].3 && last.1 + last.3 <= SHELF_CLEAR.1, "{shown} tiles: row does not fit");
         }
-        assert_eq!(shelf_shown(5), 5);
-        assert_eq!(shelf_shown(6), 4); // four files and "+2"
+        assert!(SEGMENTS[0].0 + SEGMENTS[0].2 <= SEGMENTS[1].0 && SEGMENTS[1].0 + SEGMENTS[1].2 <= SELECT_ALL.0);
     }
 
     #[test]

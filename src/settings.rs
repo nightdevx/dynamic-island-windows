@@ -11,11 +11,13 @@ pub struct Settings {
     pub show_exe: Vec<String>,
     /// Moving bars while music plays; they cost the compositor a frame per refresh.
     pub equalizer: bool,
+    /// New screenshots go to the shelf, with a peek.
+    pub screenshots: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { expand_on_hover: true, hover_delay_ms: 300, hide_exe: Vec::new(), show_exe: Vec::new(), equalizer: true }
+        Self { expand_on_hover: true, hover_delay_ms: 300, hide_exe: Vec::new(), show_exe: Vec::new(), equalizer: true, screenshots: true }
     }
 }
 
@@ -36,6 +38,9 @@ show_exe=
 
 # Müzik çalarken kapalı island'daki hareketli çubuklar. false: daha az GPU, sabit çubuklar.
 equalizer=true
+
+# Yeni ekran görüntüleri (Win + PrtScn, Ekran Alıntısı Aracı) Raf'a eklensin ve kısa bir önizleme açılsın mı?
+screenshots=true
 ";
 
 fn exe_list(value: &str) -> Vec<String> {
@@ -92,6 +97,7 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
         let ok = match key {
             "expand_on_hover" => value.parse().map(|v| settings.expand_on_hover = v).is_ok(),
             "equalizer" => value.parse().map(|v| settings.equalizer = v).is_ok(),
+            "screenshots" => value.parse().map(|v| settings.screenshots = v).is_ok(),
             "hover_delay_ms" => value.parse().ok().filter(|v| *v <= 5000).map(|v| settings.hover_delay_ms = v).is_some(),
             "hide_exe" => {
                 settings.hide_exe = exe_list(value);

@@ -35,6 +35,8 @@
 - **Çalan müzik:** Windows medya kontrollerinde görünen her oynatıcı (Spotify, tarayıcılar, Medya Oynatıcı, Apple Music…). Şarkı, sanatçı, kapak ve ilerleme. Önceki, oynat/duraklat, sonraki, karıştır ve tekrar düğmeleri (oynatıcı destekliyorsa). İlerleme çubuğuna tıklayınca o yere atlar, fare tekerleği oynatıcılar arasında geçer. Müzik çalarken kapalı hapta küçük bir ekolayzer döner ve kenarında kapak renginde soluk bir parıltı olur.
 - **Claude Code:** açık oturumlar ve ne yaptıkları (çalışıyor, izin bekliyor, yanıt hazır), 5 saatlik ve haftalık plan limitleri. Seni bekleyen bir oturum kısa bir önizleme açar. Bir oturuma tıklamak onun penceresini öne getirir.
 - **Dosya rafı:** dosyaları island'a sürükleyin, rafında beklesinler; sonra oradan istediğiniz klasöre, e-postaya ya da sohbete sürükleyin. Dosyalarınız yerinden oynamaz: raf yalnızca nerede olduklarını hatırlar, bırakınca kopyalanır.
+- **Rafta ekran görüntüleri:** her yeni ekran görüntüsü (Win + PrtScn, Ekran Alıntısı Aracı) kısa bir önizlemeyle rafın ikinci listesine, çekildiği saatle eklenir.
+- **Toplu seçim:** iki listede de tıklayarak seçin, seçilenlerin hepsini birden sürükleyip bırakın. Çift tıklama dosyayı açar; uzun listeyi fare tekerleği kaydırır.
 - **Ses seviyesi:** sistem sesi değişince seviye kısa süre görünür.
 - **Mikrofon ve kamera:** bir uygulama kullanırken hap uzar ve ucunda nokta yanar: mikrofonda turuncu, kamerada yeşil.
 - **Yolunuza çıkmaz:** tam ekran uygulamalarda ve oyunlarda kendiliğinden gizlenir, diğer zamanlarda pencerelerin üstünde kalır.
@@ -67,7 +69,7 @@ Gereksinimler: Windows 10 (1809) veya Windows 11, 64 bit.
 
 - Açmak için island'ın üzerine gelin ya da tıklayın. Üstteki sekmeler Müzik, Claude ve Raf arasında geçer.
 - Island'ın üzerinde fare tekerleği: başka oynatıcıya geçer.
-- Dosyaları island'a sürükleyin: rafa konur. Raftaki bir dosyaya tıklayınca açılır, bir yere sürükleyince oraya bırakılır ve raftan kalkar.
+- Dosyaları island'a sürükleyin: rafa konur. Rafta (Dosyalar ve Ekran görüntüleri) tıklayarak seçin, birini sürükleyince seçilenlerin hepsi bırakılır ve raftan kalkar; çift tıklama açar. "Tümünü seç" hepsini seçer; "Kaldır" / "Temizle" öğeleri listeden çıkarır, dosyaları silmez.
 - Island'a ya da tepsi simgesine sağ tık: başlangıçta çalıştır, ayarlar, çıkış.
 
 ### Ayarlar
@@ -81,6 +83,7 @@ Ayarlar `%APPDATA%\DynamicIsland\settings.ini` dosyasındadır (sağ tık → ay
 | `hide_exe` | boş | Bu programlar öndeyken gizlen, örn. `valorant.exe, obs64.exe` |
 | `show_exe` | boş | Bu programlar tam ekran olsa da görünür kal |
 | `equalizer` | `true` | Müzik çalarken hareketli ekolayzer |
+| `screenshots` | `true` | Yeni ekran görüntüleri önizlemeyle rafa eklenir |
 
 ### Claude Code'u elle bağlama
 
