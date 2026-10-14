@@ -110,7 +110,8 @@ struct App {
     shelves: [Shelf; 2], // FILES dropped on the island, SCREENSHOTS taken
     list: usize,         // which of them the shelf page shows
     dropping: bool,      // files are being dragged over the island
-    shots_since: std::time::SystemTime, // screenshots after this are new
+    shots_since: std::time::SystemTime, // the island's start: only screenshots after it show
+    shots_seen: HashSet<std::path::PathBuf>, // screenshots already shown once, kept or not
 }
 
 /// Status, what it is about, 5-hour limit left and its color, color of the Claude mark.
@@ -160,12 +161,9 @@ pub fn run() -> Result<()> {
         shelves: Default::default(),
         list: FILES,
         dropping: false,
-        // The last day's screenshots are on the shelf from the start.
-        shots_since: std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600),
+        shots_since: std::time::SystemTime::now(),
+        shots_seen: HashSet::new(),
     };
-    if app.settings.screenshots {
-        app.add_screenshots(false);
-    }
     // Files dragged onto the island land on the shelf.
     let dropped = unsafe {
         OleInitialize(None).and_then(|_| RegisterDragDrop(hwnd, &IDropTarget::from(DropTarget::new(hwnd, WM_DRAG_FILES))))
@@ -599,16 +597,14 @@ impl App {
         }
     }
 
-    /// New screenshots go to the front of their list and, as `news`, peek when the shelf is
-    /// not open.
-    fn add_screenshots(&mut self, news: bool) {
+    /// Screenshots taken since the island started go to the front of their list, with a peek
+    /// when the shelf is not open. Each comes once: one taken off the list stays off.
+    fn add_screenshots(&mut self) {
         let Some(dir) = shelf::screenshots_dir() else { return };
-        // Newer than the last look, give or take a few seconds; a file twice is taken once.
-        let started = std::time::SystemTime::now();
-        let new = shelf::screenshots_since(&dir, self.shots_since);
-        self.shots_since = started - std::time::Duration::from_secs(5);
+        let mut new = shelf::screenshots_since(&dir, self.shots_since);
+        new.retain(|(path, _)| self.shots_seen.insert(path.clone()));
         let added = self.shelves[SCREENSHOTS].add_named(new, true);
-        if added == 0 || !news {
+        if added == 0 {
             return;
         }
         log(format!("shelf: {added} new screenshot(s)"));
@@ -929,7 +925,7 @@ impl App {
                 self.tracking = false;
                 unsafe { SetTimer(Some(self.hwnd), LEAVE_TIMER, LEAVE_MS, None) };
             }
-            WM_TIMER if wparam.0 == SHOT_TIMER => self.add_screenshots(true),
+            WM_TIMER if wparam.0 == SHOT_TIMER => self.add_screenshots(),
             WM_TIMER if wparam.0 == LEAVE_TIMER => self.set_view(View::Compact)?,
             WM_TIMER if wparam.0 == PEEK_TIMER && self.view == View::Peek => self.set_view(View::Compact)?,
             WM_TIMER if wparam.0 == MINUTE_TIMER && self.view == View::Expanded => self.reload_claude(true),

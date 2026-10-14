@@ -142,8 +142,9 @@ pub fn screenshots_dir() -> Option<PathBuf> {
     }
 }
 
-/// Pictures in `dir` saved after `since`, newest first, each named by the time it was taken
-/// ("14:32"): their file names all start alike.
+/// Pictures created in `dir` after `since`, newest first, each named by the time it was
+/// taken ("14:32"): their file names all start alike. Creation, not modification: OneDrive
+/// touching an old screenshot does not make it new.
 pub fn screenshots_since(dir: &Path, since: SystemTime) -> Vec<(PathBuf, String)> {
     let mut found: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(dir)
         .into_iter()
@@ -152,7 +153,7 @@ pub fn screenshots_since(dir: &Path, since: SystemTime) -> Vec<(PathBuf, String)
         .filter_map(|entry| {
             let path = entry.path();
             let picture = path.extension().is_some_and(|e| matches!(e.to_string_lossy().to_lowercase().as_str(), "png" | "jpg" | "jpeg"));
-            let made = entry.metadata().ok()?.modified().ok()?;
+            let made = entry.metadata().ok()?.created().ok()?;
             (picture && made > since).then_some((made, path))
         })
         .collect();
@@ -364,6 +365,22 @@ mod tests {
         shelf
     }
 
+    #[test]
+    fn screenshots_are_pictures_made_after_a_time() {
+        let dir = std::env::temp_dir().join(format!("island-shots-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old.png"), b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let since = SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(dir.join("new.png"), b"x").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        let found = screenshots_since(&dir, since);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let names: Vec<_> = found.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["new.png"]);
+        assert_eq!(found[0].1.len(), 5); // "14:32"
+    }
     #[test]
     fn selection_drags_and_clears() {
         let mut s = shelf(4);

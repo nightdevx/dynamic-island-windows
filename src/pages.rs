@@ -108,7 +108,7 @@ pub fn shelf_page(c: &Canvas, shelf: &Shelf, list: usize, counts: [usize; 2], dr
     }
     if shelf.items.is_empty() {
         let (glyph, title, hint) = match (list, dropping) {
-            (1, false) => ('\u{E722}', "Ekran görüntüsü yok", "Win + PrtScn ya da Ekran Alıntısı Aracı ile alınanlar burada görünür"),
+            (1, false) => ('\u{E722}', "Ekran görüntüsü yok", "Bundan sonra aldığınız ekran görüntüleri burada görünür"),
             (_, true) => ('\u{E896}', "Bırakın", "Rafta beklerler; sonra istediğiniz yere sürükleyin"),
             _ => ('\u{E896}', "Dosyaları buraya sürükleyin", "Rafta beklerler; sonra istediğiniz yere sürükleyin"),
         };
