@@ -34,6 +34,8 @@ fn main() {
         Some("--statusline") => return claude::statusline(),
         Some("--setup-claude") => return claude::setup(true),
         Some("--remove-claude") => return claude::setup(false),
+        // Explorer's "Send to → Dynamic Island": hands the files to the running island.
+        Some("--shelf") => return window::send_to_shelf(std::env::args().skip(2).collect()),
         _ => {}
     }
     if let Err(e) = run() {

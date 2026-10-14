@@ -25,8 +25,8 @@ pub const PEEK: (f32, f32) = (350.0, 44.0);
 pub const EXPANDED: (f32, f32) = (380.0, PAGE_Y + PAGE.1);
 const MAX_RADIUS: f32 = 28.0;
 // The music glow's wider stroke; half of it lies outside the pill, inside the hit region's pad.
-const GLOW_WIDTH: f32 = 8.0;
-const GLOW_ALPHA: u32 = 0x16; // per stroke; where both overlap, near the edge, about 17%
+const GLOW_WIDTH: f32 = 5.0;
+const GLOW_ALPHA: u32 = 0x0E; // per stroke; where both overlap, near the edge, about 11%
 // Must stay below 1: Motion models an underdamped spring.
 const DAMPING: f32 = 0.78;
 const PERIOD_MS: f32 = 55.0;

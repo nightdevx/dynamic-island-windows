@@ -33,8 +33,8 @@
 ## Features
 
 - **Now playing:** any player that shows up in Windows' media controls (Spotify, browsers, Media Player, Apple Music…). Title, artist, cover art and progress. Previous, play/pause, next, shuffle and repeat buttons when the player supports them. Click the progress bar to seek, scroll to switch between players. While music plays, the closed island shows a small equalizer and a soft glow in the color of the cover.
-- **Claude Code:** open sessions and what they are doing (working, waiting for permission, answer ready), plus your 5-hour and weekly plan limits. A session that needs you opens a short peek. Click a session to bring its window to the front.
-- **File shelf:** drag files onto the island and they wait on its shelf; later drag them from there to any folder, mail or chat. Your files stay where they are: the shelf only remembers them, and a drop copies.
+- **Claude Code:** open sessions and what they are doing (working, waiting for permission, answer ready), plus how much of your 5-hour and weekly plan limits you have used. A session that needs you opens a short peek. Click a session to bring its window to the front.
+- **File shelf:** drag files onto the island (or right-click them → Send to → Dynamic Island) and they wait on its shelf; later drag them from there to any folder, mail or chat. Your files stay where they are: the shelf only remembers them, and a drop copies.
 - **Screenshots on the shelf:** every new screenshot (Win + PrtScn, the Snipping Tool) lands in the shelf's second list with a short peek, labelled by the time it was taken.
 - **Pick several:** on both lists, click to select, then drag the whole selection out at once. Double-click opens a file; the wheel scrolls a long list.
 - **Volume:** a short peek with the level whenever the system volume changes.

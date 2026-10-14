@@ -161,11 +161,11 @@ pub fn two_lines(c: &Canvas, title: &str, detail: &str, w: f32, h: f32) -> Resul
 /// Diameter of the 5-hour limit ring.
 pub const RING: f32 = 22.0;
 
-/// What is left of the 5-hour limit: a ring that empties, the number inside.
-pub fn limit_ring(c: &Canvas, center: (f32, f32), left: f32, color: u32) -> Result<()> {
-    c.ring(center, RING / 2.0 - 1.5, 2.2, left / 100.0, color, FAINT)?;
+/// How much of the 5-hour limit is used: a ring that fills, the percent inside.
+pub fn limit_ring(c: &Canvas, center: (f32, f32), used: f32, color: u32) -> Result<()> {
+    c.ring(center, RING / 2.0 - 1.5, 2.2, used / 100.0, color, FAINT)?;
     let box_ = (center.0 - RING / 2.0, center.1 - RING / 2.0, RING, RING);
-    c.text(&format!("{left:.0}"), box_, if left >= 99.5 { 7.5 } else { 8.5 }, true, TEXT, Align::Center)
+    c.text(&format!("{used:.0}"), box_, if used >= 99.5 { 7.5 } else { 8.5 }, true, TEXT, Align::Center)
 }
 
 /// The volume peek in a `(w, h)` line: speaker, level bar, number.
@@ -222,17 +222,22 @@ pub fn claude_page(c: &Canvas, sessions: &[Session], limits: &Limits, now: u64) 
         c.text("Limit bilgisi yok", (X, 0.0, 200.0, 18.0), 12.0, true, TEXT, Align::Left)?;
         c.text("Claude Code'da oturum açılınca gelir", (X, 18.0, RIGHT - X, 18.0), 11.5, false, DIM, Align::Left)?;
     } else {
+        // Label, bar filled by what is used, "%23 kullanıldı", time to the reset.
         for (row, (label, window)) in [("5 saat", limits.five_hour), ("Haftalık", limits.seven_day)].into_iter().enumerate() {
             let y = row as f32 * 20.0;
-            let (remaining, text) = limit_text(window, limits.updated, now);
-            c.text(label, (X, y, 64.0, 18.0), 12.0, true, TEXT, Align::Left)?;
-            let (bar_x, bar_w) = (X + 66.0, 120.0);
+            let limit = limit_text(window, limits.updated, now);
+            c.text(label, (X, y, 56.0, 18.0), 12.0, true, TEXT, Align::Left)?;
+            let (bar_x, bar_w) = (X + 58.0, 84.0);
             c.round_rect((bar_x, y + 6.0, bar_w, 6.0), 3.0, FAINT)?;
-            if remaining > 0.0 {
-                let fill = if remaining < 0.1 { 0xFFFF453A } else if remaining < 0.3 { 0xFFFF9F0A } else { 0xFFD97757 };
-                c.round_rect((bar_x, y + 6.0, (bar_w * remaining).max(6.0), 6.0), 3.0, fill)?;
+            if limit.used > 0.0 {
+                let fill = crate::claude::usage_color(limit.used * 100.0);
+                c.round_rect((bar_x, y + 6.0, (bar_w * limit.used).max(6.0), 6.0), 3.0, fill)?;
             }
-            c.text(&text, (bar_x + bar_w + 10.0, y, RIGHT - bar_x - bar_w - 10.0, 18.0), 11.5, false, DIM, Align::Left)?;
+            c.text(&limit.used_text, (bar_x + bar_w + 8.0, y, 104.0, 18.0), 11.5, false, TEXT, Align::Left)?;
+            if limit.renews {
+                c.icon('\u{E72C}', (RIGHT - 92.0, y, 14.0, 18.0), 9.5, DIM)?; // Refresh, before the time
+            }
+            c.text(&limit.when, (RIGHT - 76.0, y, 76.0, 18.0), 11.0, false, DIM, Align::Left)?;
         }
     }
 
@@ -275,20 +280,29 @@ pub fn session_rows(sessions: &[Session]) -> Vec<&Session> {
     ordered
 }
 
-/// Remaining share (0..1) and the text next to the bar.
-pub fn limit_text(window: Option<Window>, updated: u64, now: u64) -> (f32, String) {
-    let Some(w) = window else { return (0.0, "bilgi yok".into()) };
+/// One limit row's figures.
+#[derive(Debug, PartialEq)]
+pub struct LimitText {
+    pub used: f32, // share used, 0..1
+    pub used_text: String,
+    pub when: String, // time to the reset, or how old the figures are
+    pub renews: bool, // `when` is the time to the reset
+}
+
+pub fn limit_text(window: Option<Window>, updated: u64, now: u64) -> LimitText {
+    let Some(w) = window else { return LimitText { used: 0.0, used_text: "bilgi yok".into(), when: String::new(), renews: false } };
     if now >= w.resets_at {
-        return (1.0, "%100 kaldı · sıfırlandı".into());
+        return LimitText { used: 0.0, used_text: "%0 kullanıldı".into(), when: "sıfırlandı".into(), renews: false };
     }
-    let remaining = (100.0 - w.used_percentage).clamp(0.0, 100.0);
+    let used = w.used_percentage.clamp(0.0, 100.0);
     let age = now.saturating_sub(updated);
-    let when = if age > 30 * 60 {
-        format!("{} önce", duration_text(age))
+    // Figures older than half an hour say so instead of a countdown that may be stale.
+    let (when, renews) = if age > 30 * 60 {
+        (format!("{} önce", duration_text(age)), false)
     } else {
-        format!("{} sonra", duration_text(w.resets_at - now))
+        (duration_text(w.resets_at - now), true)
     };
-    ((remaining / 100.0) as f32, format!("%{remaining:.0} kaldı · {when}"))
+    LimitText { used: (used / 100.0) as f32, used_text: format!("%{used:.0} kullanıldı"), when, renews }
 }
 
 fn duration_text(seconds: u64) -> String {
@@ -344,12 +358,14 @@ mod tests {
         assert_eq!(duration_text(2 * 3600 + 13 * 60), "2 sa 13 dk");
         assert_eq!(duration_text(3 * 86400 + 4 * 3600), "3 g 4 sa");
         let w = Window { used_percentage: 42.4, resets_at: 10_000 };
-        let (remaining, text) = limit_text(Some(w), 1_000, 1_000 + 60);
-        assert!((remaining - 0.576).abs() < 1e-4);
-        assert_eq!(text, "%58 kaldı · 2 sa 29 dk sonra");
-        assert_eq!(limit_text(Some(w), 0, 10_000).1, "%100 kaldı · sıfırlandı");
-        assert_eq!(limit_text(Some(w), 0, 3_000).1, "%58 kaldı · 50 dk önce");
-        assert_eq!(limit_text(None, 0, 0).1, "bilgi yok");
+        let fresh = limit_text(Some(w), 1_000, 1_000 + 60);
+        assert!((fresh.used - 0.424).abs() < 1e-4);
+        assert_eq!((fresh.used_text.as_str(), fresh.when.as_str(), fresh.renews), ("%42 kullanıldı", "2 sa 29 dk", true));
+        let reset = limit_text(Some(w), 0, 10_000);
+        assert_eq!((reset.used, reset.used_text.as_str(), reset.when.as_str()), (0.0, "%0 kullanıldı", "sıfırlandı"));
+        let stale = limit_text(Some(w), 0, 3_000); // figures 50 minutes old
+        assert_eq!((stale.when.as_str(), stale.renews), ("50 dk önce", false));
+        assert_eq!(limit_text(None, 0, 0).used_text, "bilgi yok");
     }
 
     #[test]

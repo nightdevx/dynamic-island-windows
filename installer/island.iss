@@ -58,6 +58,8 @@ Source: "{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Dynamic Island"; Filename: "{app}\island.exe"
+; Explorer's "Send to" menu: puts the selected files on the shelf.
+Name: "{usersendto}\Dynamic Island"; Filename: "{app}\island.exe"; Parameters: "--shelf"
 
 [Registry]
 ; The same value the app's own "Başlangıçta çalıştır" menu item writes.

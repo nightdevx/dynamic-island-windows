@@ -33,8 +33,8 @@
 ## Özellikler
 
 - **Çalan müzik:** Windows medya kontrollerinde görünen her oynatıcı (Spotify, tarayıcılar, Medya Oynatıcı, Apple Music…). Şarkı, sanatçı, kapak ve ilerleme. Önceki, oynat/duraklat, sonraki, karıştır ve tekrar düğmeleri (oynatıcı destekliyorsa). İlerleme çubuğuna tıklayınca o yere atlar, fare tekerleği oynatıcılar arasında geçer. Müzik çalarken kapalı hapta küçük bir ekolayzer döner ve kenarında kapak renginde soluk bir parıltı olur.
-- **Claude Code:** açık oturumlar ve ne yaptıkları (çalışıyor, izin bekliyor, yanıt hazır), 5 saatlik ve haftalık plan limitleri. Seni bekleyen bir oturum kısa bir önizleme açar. Bir oturuma tıklamak onun penceresini öne getirir.
-- **Dosya rafı:** dosyaları island'a sürükleyin, rafında beklesinler; sonra oradan istediğiniz klasöre, e-postaya ya da sohbete sürükleyin. Dosyalarınız yerinden oynamaz: raf yalnızca nerede olduklarını hatırlar, bırakınca kopyalanır.
+- **Claude Code:** açık oturumlar ve ne yaptıkları (çalışıyor, izin bekliyor, yanıt hazır), 5 saatlik ve haftalık plan limitlerinin ne kadarının kullanıldığı. Seni bekleyen bir oturum kısa bir önizleme açar. Bir oturuma tıklamak onun penceresini öne getirir.
+- **Dosya rafı:** dosyaları island'a sürükleyin (ya da sağ tık → Gönder → Dynamic Island), rafında beklesinler; sonra oradan istediğiniz klasöre, e-postaya ya da sohbete sürükleyin. Dosyalarınız yerinden oynamaz: raf yalnızca nerede olduklarını hatırlar, bırakınca kopyalanır.
 - **Rafta ekran görüntüleri:** her yeni ekran görüntüsü (Win + PrtScn, Ekran Alıntısı Aracı) kısa bir önizlemeyle rafın ikinci listesine, çekildiği saatle eklenir.
 - **Toplu seçim:** iki listede de tıklayarak seçin, seçilenlerin hepsini birden sürükleyip bırakın. Çift tıklama dosyayı açar; uzun listeyi fare tekerleği kaydırır.
 - **Ses seviyesi:** sistem sesi değişince seviye kısa süre görünür.

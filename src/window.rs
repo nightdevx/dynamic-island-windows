@@ -11,6 +11,7 @@ use windows::{
         Graphics::Gdi::*,
         Storage::FileSystem::*,
         System::{
+            DataExchange::COPYDATASTRUCT,
             LibraryLoader::GetModuleHandleW,
             Ole::{IDropTarget, OleInitialize, RegisterDragDrop, RevokeDragDrop},
             Registry::*,
@@ -51,6 +52,7 @@ const WM_DEVICE_LOST: u32 = WM_APP + 6;
 const WM_VOLUME: u32 = WM_APP + 7;
 const WM_AUDIO_DEVICE: u32 = WM_APP + 8;
 const WM_DRAG_FILES: u32 = WM_APP + 10; // WPARAM: 1 files came over, 0 they left, 2 dropped
+const SHELF_COPYDATA: usize = 0x5348_454C; // "SHEL": WM_COPYDATA from `island.exe --shelf`
 const VOLUME_MS: u32 = 1500;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1; // NINF_KEY
 // All timers are one-shot: the window procedure kills each one when it fires.
@@ -113,6 +115,21 @@ struct App {
 
 /// Status, what it is about, 5-hour limit left and its color, color of the Claude mark.
 type CompactLine = (String, String, Option<(f32, u32)>, u32);
+
+/// `island.exe --shelf <files>`: puts the files on the running island's shelf. Explorer's
+/// "Send to → Dynamic Island" runs this with the selected files.
+pub fn send_to_shelf(paths: Vec<String>) {
+    let text = paths.join("\n");
+    let data = COPYDATASTRUCT { dwData: SHELF_COPYDATA, cbData: text.len() as u32, lpData: text.as_ptr() as *mut _ };
+    unsafe {
+        match FindWindowW(w!("NightdijitalIsland"), None) {
+            Ok(island) => {
+                SendMessageW(island, WM_COPYDATA, Some(WPARAM(0)), Some(LPARAM(&data as *const _ as isize)));
+            }
+            Err(_) => log("shelf: the island is not running"),
+        }
+    }
+}
 
 /// Creates the island window and runs the message loop until it is destroyed.
 pub fn run() -> Result<()> {
@@ -481,7 +498,7 @@ impl App {
     fn show_claude_state(&mut self, pulse: bool) {
         let (status, detail, mark) = claude::summary(&self.sessions, |s| !self.seen.contains(&s.id));
         // ponytail: a limit that resets while nothing happens shows 100 only at the next event
-        let line = (status, detail, claude::five_hour_left(&self.limits, claude::now_ms() / 1000), mark);
+        let line = (status, detail, claude::five_hour_used(&self.limits, claude::now_ms() / 1000), mark);
         let Some(island) = &self.island else { return };
         if self.compact_line.as_ref() != Some(&line) {
             if let Err(e) = island.draw_compact(&line.0, &line.1, line.2, line.3) {
@@ -961,6 +978,23 @@ impl App {
             WM_MEDIA => self.media_changed(),
             WM_VOLUME => self.show_volume(wparam.0 as u32, lparam.0 != 0),
             WM_DRAG_FILES => self.files_dragged(wparam.0),
+            // Files sent with `island.exe --shelf` (Explorer's "Send to").
+            WM_COPYDATA => {
+                let data = unsafe { (lparam.0 as *const COPYDATASTRUCT).as_ref() };
+                let Some(data) = data.filter(|d| d.dwData == SHELF_COPYDATA && !d.lpData.is_null()) else { return Ok(None) };
+                let bytes = unsafe { std::slice::from_raw_parts(data.lpData as *const u8, data.cbData as usize) };
+                let paths: Vec<std::path::PathBuf> = String::from_utf8_lossy(bytes).lines().filter(|l| !l.is_empty()).map(Into::into).collect();
+                let added = self.shelves[FILES].add(paths, false);
+                log(format!("shelf: {added} file(s) sent"));
+                self.list = FILES;
+                if self.view == View::Expanded && self.tab() == Some(Tab::Shelf) {
+                    self.draw_shelf();
+                } else if added > 0 {
+                    let text = format!("{added} dosya rafta");
+                    self.peek(Tab::Shelf, PEEK_MS, |island| island.draw_peek(&text, Some(0xFF0A84FF)));
+                }
+                return Ok(Some(LRESULT(1)));
+            }
             WM_AUDIO_DEVICE => self.follow_audio(),
             // On the open shelf the wheel scrolls its row; elsewhere it switches players.
             WM_MOUSEWHEEL if self.view == View::Expanded && self.tab() == Some(Tab::Shelf) => {
@@ -1108,9 +1142,11 @@ fn press_shelf_item(hwnd: HWND, index: usize, dragged: &[std::path::PathBuf], mu
         }
         return;
     }
+    // DragDetect waits for the mouse; a click that did not come from a held button (pen,
+    // touch, a posted message) is a click.
     let dragging = unsafe {
         let _ = ClientToScreen(hwnd, &mut point);
-        DragDetect(hwnd, point).as_bool()
+        GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 && DragDetect(hwnd, point).as_bool()
     };
     if !dragging {
         with_app(&mut |app| app.toggle_shelf_item(index));

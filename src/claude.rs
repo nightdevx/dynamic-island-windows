@@ -183,7 +183,7 @@ fn status_text(model: &str, limits: Option<&Limits>) -> String {
     if let Some(limits) = limits {
         for (label, window) in [("5 sa", limits.five_hour), ("hafta", limits.seven_day)] {
             if let Some(w) = window {
-                parts.push(format!("{label} %{:.0} kaldı", (100.0 - w.used_percentage).max(0.0)));
+                parts.push(format!("{label} %{:.0} kullanıldı", w.used_percentage.clamp(0.0, 100.0)));
             }
         }
     }
@@ -413,19 +413,22 @@ pub fn summary(sessions: &[Session], unseen: impl Fn(&Session) -> bool) -> (Stri
     }
 }
 
-/// Percent left of the 5-hour limit, and its color: Claude's own while there is plenty,
-/// orange under 30%, red under 10%.
-pub fn five_hour_left(limits: &Limits, now: u64) -> Option<(f32, u32)> {
+/// Percent used of the 5-hour limit (0 once it has reset), and its color.
+pub fn five_hour_used(limits: &Limits, now: u64) -> Option<(f32, u32)> {
     let w = limits.five_hour?;
-    let left = if now >= w.resets_at { 100.0 } else { (100.0 - w.used_percentage).clamp(0.0, 100.0) as f32 };
-    let color = if left < 10.0 {
+    let used = if now >= w.resets_at { 0.0 } else { w.used_percentage.clamp(0.0, 100.0) as f32 };
+    Some((used, usage_color(used)))
+}
+
+/// A limit's color by how much of it is used: Claude's own, orange from 70%, red from 90%.
+pub fn usage_color(used: f32) -> u32 {
+    if used >= 90.0 {
         0xFFFF453A
-    } else if left < 30.0 {
+    } else if used >= 70.0 {
         0xFFFF9F0A
     } else {
         0xFFD97757
-    };
-    Some((left, color))
+    }
 }
 
 /// Sessions whose Claude process still runs, newest first, and the last known limits.
@@ -541,10 +544,12 @@ mod tests {
         assert_eq!(text(summary(&done, |_| false)), "Çalışıyor / web +1");
 
         let limits = Limits { five_hour: Some(Window { used_percentage: 92.6, resets_at: 100 }), ..Limits::default() };
-        let left = five_hour_left(&limits, 50).unwrap();
-        assert!((left.0 - 7.4).abs() < 1e-3 && left.1 == 0xFFFF453A);
-        assert_eq!(five_hour_left(&limits, 100).map(|l| l.0), Some(100.0)); // reset since
-        assert_eq!(five_hour_left(&Limits::default(), 0), None);
+        let used = five_hour_used(&limits, 50).unwrap();
+        assert!((used.0 - 92.6).abs() < 1e-3 && used.1 == 0xFFFF453A);
+        assert_eq!(five_hour_used(&limits, 100).map(|l| l.0), Some(0.0)); // reset since
+        assert_eq!(five_hour_used(&Limits::default(), 0), None);
+        assert_eq!(usage_color(69.0), 0xFFD97757);
+        assert_eq!(usage_color(70.0), 0xFFFF9F0A);
     }
 
     #[test]
@@ -589,7 +594,7 @@ mod tests {
             updated: 0,
         };
         assert_eq!(limits.five_hour, Some(Window { used_percentage: 42.4, resets_at: 1760370000 }));
-        assert_eq!(status_text("Opus 5.5", Some(&limits)), "Opus 5.5 · 5 sa %58 kaldı · hafta %82 kaldı");
+        assert_eq!(status_text("Opus 5.5", Some(&limits)), "Opus 5.5 · 5 sa %42 kullanıldı · hafta %18 kullanıldı");
         assert_eq!(status_text("Opus 5.5", None), "Opus 5.5");
         // The file format round-trips.
         let line = |w: Window| format!("{} {}", w.used_percentage, w.resets_at);
