@@ -34,10 +34,14 @@
 
 - **Now playing:** any player that shows up in Windows' media controls (Spotify, browsers, Media Player, Apple Music…). Title, artist, cover art and progress. Previous, play/pause, next, shuffle and repeat buttons when the player supports them. Click the progress bar to seek, scroll to switch between players. While music plays, the closed island shows a small equalizer and a soft glow in the color of the cover.
 - **Claude Code:** open sessions and what they are doing (working, waiting for permission, answer ready), plus your 5-hour and weekly plan limits. A session that needs you opens a short peek. Click a session to bring its window to the front.
+- **File shelf:** drag files onto the island and they wait on its shelf; later drag them from there to any folder, mail or chat. Your files stay where they are: the shelf only remembers them, and a drop copies.
 - **Volume:** a short peek with the level whenever the system volume changes.
 - **Microphone and camera:** while an app uses them, the island grows a dot, orange for the microphone and green for the camera.
 - **Out of the way:** hides by itself in fullscreen apps and games, and stays above other windows otherwise.
 
+<p align="center">
+  <img src="docs/shelf.png" alt="The file shelf">
+</p>
 <p align="center">
   <img src="docs/peek.png" alt="A peek: a session waiting for permission">
   &nbsp;
@@ -61,8 +65,9 @@ Requires Windows 10 (1809) or Windows 11, 64-bit. The interface is in Turkish.
 
 ## Use
 
-- Hover over the island, or click it, to open it. The tabs at the top switch between Music and Claude.
+- Hover over the island, or click it, to open it. The tabs at the top switch between Music, Claude and the shelf (Raf).
 - Scroll over the island to switch to another player.
+- Drag files onto the island to put them on the shelf. On the shelf, click a file to open it, or drag it anywhere to drop it there (it then leaves the shelf).
 - Right-click the island or its tray icon for: start with Windows, settings, exit.
 
 ### Settings
@@ -133,6 +138,7 @@ How it is put together:
 | `src/media.rs` | Windows media sessions, on their own thread |
 | `src/claude.rs`, `src/usage.rs` | Claude Code hooks, sessions and plan limits |
 | `src/audio.rs`, `src/privacy.rs` | Volume, microphone/camera |
+| `src/shelf.rs` | The file shelf: drag and drop in and out |
 | `src/json.rs` | Editing Claude Code's settings without reordering them |
 | `src/fullscreen.rs` | When to hide |
 

@@ -12,6 +12,7 @@ use windows_numerics::{Vector2, Vector3};
 use crate::{
     claude::{Limits, Session},
     media::{Art, Media},
+    shelf,
     pages::{self, ART, ART_SOURCE, BAR, BUTTON, BUTTONS_Y, BUTTON_X, PAGE, TEXT, TIMES},
     render::{Align, Painter},
 };
@@ -19,8 +20,8 @@ use crate::{
 // Sizes in DIPs; multiplied by the monitor scale at runtime.
 pub const TOP: f32 = 8.0; // gap between the screen edge and the pill
 const MARGIN: f32 = 16.0; // room inside the window for spring overshoot
-pub const COMPACT: (f32, f32) = (290.0, 36.0);
-pub const PEEK: (f32, f32) = (330.0, 40.0);
+pub const COMPACT: (f32, f32) = (310.0, 40.0);
+pub const PEEK: (f32, f32) = (350.0, 44.0);
 pub const EXPANDED: (f32, f32) = (380.0, PAGE_Y + PAGE.1);
 const MAX_RADIUS: f32 = 28.0;
 // The music glow's wider stroke; half of it lies outside the pill, inside the hit region's pad.
@@ -33,10 +34,10 @@ const PERIOD_MS: f32 = 55.0;
 // Compact: a lead (Claude's mark, or the art), two lines of text, and the line's own item on
 // the right (the 5-hour limit ring, or the equalizer). Both lines' text surfaces span from
 // TEXT_X to the pill's end.
-const MARK: f32 = 18.0;
+const MARK: f32 = 19.0;
 const TEXT_X: f32 = 38.0;
 const LINES: (f32, f32) = (COMPACT.0 - TEXT_X, COMPACT.1);
-const SMALL_ART: f32 = 24.0;
+const SMALL_ART: f32 = 26.0;
 const EDGE: f32 = 14.0; // right padding
 const GAP: f32 = 8.0; // between the text and the item after it
 const BARS: usize = 4;
@@ -52,7 +53,7 @@ const PRIVACY_EXTRA: f32 = 18.0;
 const DOT: f32 = 7.0;
 
 // Expanded: tab bar on top, the selected page below it.
-const TAB_W: f32 = 92.0;
+const TAB_W: f32 = 82.0;
 const TAB_H: f32 = 24.0;
 const TAB_Y: f32 = 8.0;
 const PAGE_Y: f32 = 38.0;
@@ -78,6 +79,7 @@ impl View {
 pub enum Tab {
     Music,
     Claude,
+    Shelf,
 }
 
 impl Tab {
@@ -102,8 +104,10 @@ pub enum Hit {
     Next,
     Shuffle,
     Repeat,
-    Seek(f64),      // 0..1 of the track
-    Session(usize), // row on the Claude page
+    Seek(f64),        // 0..1 of the track
+    Session(usize),   // row on the Claude page
+    ShelfItem(usize), // a file on the shelf
+    ClearShelf,
 }
 
 /// Window size in pixels: the largest view plus room for spring overshoot.
@@ -153,13 +157,14 @@ pub struct Island {
     peek_surface: CompositionDrawingSurface,
     expanded: ContainerVisual,
     highlight: ShapeVisual,
-    pages: [ContainerVisual; 2],
-    page_surfaces: [CompositionDrawingSurface; 2],
+    pages: [ContainerVisual; 3],
+    page_surfaces: [CompositionDrawingSurface; 3],
     times_surface: CompositionDrawingSurface,
     progress_track: ContainerVisual,
     progress: SpriteVisual,
     buttons: [SpriteVisual; 6], // previous, play, pause, next, shuffle, repeat
     button_surfaces: [CompositionDrawingSurface; 6],
+    shelf_items: usize, // files on the shelf page, for hit testing
     privacy_brush: CompositionColorBrush,
     privacy_dots: [SpriteVisual; 2], // closed pill, tab bar
     extra: f32,                      // width the closed pill gives the privacy dot, DIPs
@@ -347,7 +352,7 @@ impl Island {
 
         let header_surface = painter.surface((EXPANDED.0, PAGE_Y))?;
         painter.draw(&header_surface, |c| {
-            for (tab, label) in [(Tab::Music, "Müzik"), (Tab::Claude, "Claude")] {
+            for (tab, label) in [(Tab::Music, "Müzik"), (Tab::Claude, "Claude"), (Tab::Shelf, "Raf")] {
                 c.text(label, (tab_left(tab), TAB_Y, TAB_W, TAB_H), 12.5, true, TEXT, Align::Center)?;
             }
             Ok(())
@@ -356,9 +361,10 @@ impl Island {
         let expanded_dot = dot((EXPANDED.0 - 24.0, TAB_Y + TAB_H / 2.0))?;
         expanded.Children()?.InsertAtTop(&expanded_dot)?;
 
-        let page_surfaces = [painter.surface(PAGE)?, painter.surface(PAGE)?];
-        let pages = [container(at(0.0, PAGE_Y), PAGE)?, container(at(0.0, PAGE_Y), PAGE)?];
+        let page_surfaces = [painter.surface(PAGE)?, painter.surface(PAGE)?, painter.surface(PAGE)?];
+        let pages = [container(at(0.0, PAGE_Y), PAGE)?, container(at(0.0, PAGE_Y), PAGE)?, container(at(0.0, PAGE_Y), PAGE)?];
         pages[1].SetOpacity(0.0)?;
+        pages[2].SetOpacity(0.0)?;
         for (page, surface) in pages.iter().zip(&page_surfaces) {
             page.Children()?.InsertAtTop(&sprite(&surface_brush(surface)?, at(0.0, 0.0), PAGE)?)?;
             expanded.Children()?.InsertAtTop(page)?;
@@ -398,7 +404,7 @@ impl Island {
         spring.SetPeriod(ms(PERIOD_MS as i64))?;
         let easing = compositor.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?;
 
-        let island = Self {
+        let mut island = Self {
             scale,
             window,
             compositor,
@@ -433,6 +439,7 @@ impl Island {
             progress,
             buttons,
             button_surfaces,
+            shelf_items: 0,
             privacy_brush,
             privacy_dots: [compact_dot, expanded_dot],
             extra: 0.0,
@@ -442,6 +449,7 @@ impl Island {
         };
         island.set_media(None, 0)?;
         island.set_art(None, false)?;
+        island.draw_shelf(&[], false)?;
         Ok(island)
     }
 
@@ -521,7 +529,7 @@ impl Island {
         if tab == self.tab {
             return Ok(());
         }
-        let direction = if tab == Tab::Claude { 1.0 } else { -1.0 };
+        let direction = if tab.index() > self.tab.index() { 1.0 } else { -1.0 };
         let shift = 18.0 * self.scale;
 
         let slide = self.compositor.CreateScalarKeyFrameAnimation()?;
@@ -562,13 +570,24 @@ impl Island {
         let left = (self.window.X - EXPANDED.0 * self.scale) / 2.0;
         let (x, y) = ((x as f32 - left) / self.scale, y as f32 / self.scale - TOP);
         if (TAB_Y - 4.0..=TAB_Y + TAB_H + 4.0).contains(&y) {
-            let tab = [Tab::Music, Tab::Claude].into_iter().find(|&tab| (tab_left(tab)..tab_left(tab) + TAB_W).contains(&x));
+            let tab = [Tab::Music, Tab::Claude, Tab::Shelf].into_iter().find(|&tab| (tab_left(tab)..tab_left(tab) + TAB_W).contains(&x));
             return tab.map(Hit::Tab);
         }
         let y = y - PAGE_Y;
-        if self.tab == Tab::Claude {
-            let row = ((y - pages::SESSIONS_Y) / pages::ROW_H).floor();
-            return (y >= pages::SESSIONS_Y && (12.0..PAGE.0 - 12.0).contains(&x)).then_some(Hit::Session(row as usize));
+        let inside = |(bx, by, bw, bh): (f32, f32, f32, f32)| (bx..bx + bw).contains(&x) && (by..by + bh).contains(&y);
+        match self.tab {
+            Tab::Claude => {
+                let row = ((y - pages::SESSIONS_Y) / pages::ROW_H).floor();
+                return (y >= pages::SESSIONS_Y && (12.0..PAGE.0 - 12.0).contains(&x)).then_some(Hit::Session(row as usize));
+            }
+            Tab::Shelf => {
+                if self.shelf_items > 0 && inside(pages::SHELF_CLEAR) {
+                    return Some(Hit::ClearShelf);
+                }
+                let shown = pages::shelf_shown(self.shelf_items);
+                return (0..shown).find(|&i| inside(pages::shelf_tile(i, self.shelf_items))).map(Hit::ShelfItem);
+            }
+            Tab::Music => {}
         }
         if (BUTTONS_Y..BUTTONS_Y + BUTTON).contains(&y) {
             let column = BUTTON_X.iter().position(|left| (*left..left + BUTTON).contains(&x))?;
@@ -718,6 +737,13 @@ impl Island {
         Ok(())
     }
 
+    /// The shelf page: the files on it, or where to drop them; `dropping` while files are
+    /// dragged over the island.
+    pub fn draw_shelf(&mut self, items: &[shelf::Item], dropping: bool) -> Result<()> {
+        self.shelf_items = items.len();
+        self.painter.draw(&self.page_surfaces[Tab::Shelf.index()], |c| pages::shelf_page(c, items, dropping))
+    }
+
     pub fn draw_claude(&self, sessions: &[Session], limits: &Limits, now: u64) -> Result<()> {
         self.painter.draw(&self.page_surfaces[Tab::Claude.index()], |c| pages::claude_page(c, sessions, limits, now))
     }
@@ -781,7 +807,7 @@ fn bar_height(bar: usize, step: usize) -> f32 {
 }
 
 fn tab_left(tab: Tab) -> f32 {
-    EXPANDED.0 / 2.0 + (tab.index() as f32 - 1.0) * TAB_W
+    EXPANDED.0 / 2.0 + (tab.index() as f32 - 1.5) * TAB_W
 }
 
 /// Mirrors a compositor spring so a retargeted animation keeps its current velocity;
@@ -838,8 +864,11 @@ mod tests {
 
     #[test]
     fn tabs_sit_side_by_side_in_the_middle() {
-        assert_eq!(tab_left(Tab::Music) + TAB_W, EXPANDED.0 / 2.0);
-        assert_eq!(tab_left(Tab::Claude), EXPANDED.0 / 2.0);
+        assert_eq!(tab_left(Tab::Claude) + TAB_W / 2.0, EXPANDED.0 / 2.0);
+        assert_eq!(tab_left(Tab::Music) + TAB_W, tab_left(Tab::Claude));
+        assert_eq!(tab_left(Tab::Claude) + TAB_W, tab_left(Tab::Shelf));
+        // Clear of the privacy dot at the right end of the tab bar.
+        assert!(tab_left(Tab::Shelf) + TAB_W <= EXPANDED.0 - 34.0);
     }
 
     #[test]

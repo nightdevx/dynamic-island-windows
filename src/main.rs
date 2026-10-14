@@ -10,6 +10,7 @@ mod pages;
 mod privacy;
 mod render;
 mod settings;
+mod shelf;
 mod usage;
 mod window;
 

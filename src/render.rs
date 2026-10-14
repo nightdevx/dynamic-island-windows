@@ -205,6 +205,21 @@ impl Canvas<'_> {
         Ok(())
     }
 
+    /// A rounded rectangle's outline, dashed or solid.
+    pub fn outline(&self, bounds: (f32, f32, f32, f32), radius: f32, width: f32, argb: u32, dashed: bool) -> Result<()> {
+        let rounded = D2D1_ROUNDED_RECT { rect: self.rect(bounds), radiusX: radius * self.scale, radiusY: radius * self.scale };
+        unsafe {
+            let style = D2D1_STROKE_STYLE_PROPERTIES {
+                dashStyle: if dashed { D2D1_DASH_STYLE_DASH } else { D2D1_DASH_STYLE_SOLID },
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                ..Default::default()
+            };
+            let stroke = self.dc.GetFactory()?.CreateStrokeStyle(&style, None)?;
+            self.dc.DrawRoundedRectangle(&rounded, &self.brush(argb)?, width * self.scale, &stroke);
+        }
+        Ok(())
+    }
+
     /// Claude's mark: rounded rays of alternating length around a center.
     pub fn spark(&self, (cx, cy): (f32, f32), radius: f32, argb: u32) -> Result<()> {
         const RAYS: usize = 10;

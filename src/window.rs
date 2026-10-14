@@ -10,7 +10,12 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         Storage::FileSystem::*,
-        System::{LibraryLoader::GetModuleHandleW, Registry::*, Threading::INFINITE},
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            Ole::{IDropTarget, OleInitialize, RegisterDragDrop, RevokeDragDrop},
+            Registry::*,
+            Threading::INFINITE,
+        },
         UI::{Accessibility::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
 };
@@ -24,6 +29,7 @@ use crate::{
     media::{Command, Media, MediaLink},
     privacy,
     settings::{self, Settings},
+    shelf::{self, DropTarget, Shelf},
     usage,
 };
 
@@ -44,6 +50,7 @@ const WM_MEDIA: u32 = WM_APP + 5;
 const WM_DEVICE_LOST: u32 = WM_APP + 6;
 const WM_VOLUME: u32 = WM_APP + 7;
 const WM_AUDIO_DEVICE: u32 = WM_APP + 8;
+const WM_DRAG_FILES: u32 = WM_APP + 10; // WPARAM: 1 files came over, 0 they left, 2 dropped
 const VOLUME_MS: u32 = 1500;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1; // NINF_KEY
 // All timers are one-shot: the window procedure kills each one when it fires.
@@ -93,6 +100,8 @@ struct App {
     privacy: privacy::InUse,
     volume: Option<audio::Volume>,
     last_volume: Option<(u32, bool)>, // shown or current level and mute
+    shelf: Shelf,
+    dropping: bool, // files are being dragged over the island
 }
 
 /// Status, what it is about, 5-hour limit left and its color, color of the Claude mark.
@@ -124,7 +133,16 @@ pub fn run() -> Result<()> {
         privacy: privacy::in_use(), // what was in use before we started is not news
         volume: None,
         last_volume: None,
+        shelf: Shelf::default(),
+        dropping: false,
     };
+    // Files dragged onto the island land on the shelf.
+    let dropped = unsafe {
+        OleInitialize(None).and_then(|_| RegisterDragDrop(hwnd, &IDropTarget::from(DropTarget::new(hwnd, WM_DRAG_FILES))))
+    };
+    if let Err(e) = dropped {
+        log(format!("drop target: {e}"));
+    }
     app.volume = audio::Volume::new(hwnd, WM_VOLUME, WM_AUDIO_DEVICE).map_err(|e| log(format!("volume: {e}"))).ok();
     app.follow_audio();
     app.place(false)?;
@@ -489,9 +507,54 @@ impl App {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), MINUTE_TIMER);
             }
+            if tab == Tab::Shelf && self.shelf.prune() {
+                self.draw_shelf();
+            }
             self.update_live();
         }
         Ok(())
+    }
+
+    fn draw_shelf(&mut self) {
+        if let Some(Err(e)) = self.island.as_mut().map(|island| island.draw_shelf(&self.shelf.items, self.dropping)) {
+            log(format!("shelf draw failed: {e}"));
+        }
+    }
+
+    /// Files dragged over the island (`what` as in WM_DRAG_FILES): it opens on the shelf to
+    /// take them, and closes again when they are taken elsewhere.
+    fn files_dragged(&mut self, what: usize) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), LEAVE_TIMER);
+        }
+        self.dropping = what == 1;
+        match what {
+            1 => {
+                let opened = self.island.as_mut().map_or(Ok(()), |island| island.set_tab(Tab::Shelf)).and_then(|_| self.set_view(View::Expanded));
+                if let Err(e) = opened {
+                    log(format!("open for a drop failed: {e}"));
+                }
+            }
+            2 => {
+                let files = shelf::take_dropped();
+                log(format!("shelf: {} file(s) dropped", files.len()));
+                self.shelf.add(files, (crate::pages::SHELF_ICON * self.scale).round() as u32);
+            }
+            _ => unsafe {
+                SetTimer(Some(self.hwnd), LEAVE_TIMER, LEAVE_MS, None);
+            },
+        }
+        self.draw_shelf();
+    }
+
+    /// The shelf file under a press, if the shelf page is open there.
+    fn shelf_item_at(&self, lparam: LPARAM) -> Option<(std::path::PathBuf, POINT)> {
+        if self.view != View::Expanded || self.tab() != Some(Tab::Shelf) {
+            return None;
+        }
+        let (x, y) = ((lparam.0 & 0xFFFF) as i16 as i32, ((lparam.0 >> 16) & 0xFFFF) as i16 as i32);
+        let Some(Hit::ShelfItem(i)) = self.island.as_ref()?.hit(x, y) else { return None };
+        Some((self.shelf.items.get(i)?.path.clone(), POINT { x, y }))
     }
 
     /// Clicks outside this rectangle fall through to the window below.
@@ -732,6 +795,11 @@ impl App {
                     }
                 }
             }
+            Hit::ShelfItem(_) => {} // pressed files are dragged or opened before APP is borrowed
+            Hit::ClearShelf => {
+                self.shelf.items.clear();
+                self.draw_shelf();
+            }
         }
         Ok(())
     }
@@ -813,6 +881,7 @@ impl App {
             }
             WM_MEDIA => self.media_changed(),
             WM_VOLUME => self.show_volume(wparam.0 as u32, lparam.0 != 0),
+            WM_DRAG_FILES => self.files_dragged(wparam.0),
             WM_AUDIO_DEVICE => self.follow_audio(),
             WM_MOUSEWHEEL => self.media_command(Command::NextSession),
             WM_COMMAND => match wparam.0 & 0xFFFF {
@@ -859,8 +928,20 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
     if msg == WM_DESTROY {
         tray(hwnd, NIM_DELETE);
         appbar(hwnd, ABM_REMOVE);
-        unsafe { PostQuitMessage(0) };
+        unsafe {
+            let _ = RevokeDragDrop(hwnd);
+            PostQuitMessage(0);
+        }
         return LRESULT(0);
+    }
+    // A file on the shelf: dragging it out runs a modal loop that dispatches our messages,
+    // so it happens with APP free.
+    if msg == WM_LBUTTONDOWN {
+        let pressed = APP.with(|cell| cell.try_borrow().ok()?.as_ref()?.shelf_item_at(lparam));
+        if let Some((path, point)) = pressed {
+            press_shelf_file(hwnd, &path, point);
+            return LRESULT(0);
+        }
     }
     // try_borrow: calls made while handling a message can re-enter here synchronously.
     let handled = APP.with(|cell| {
@@ -918,6 +999,26 @@ fn foreground_title() -> String {
     let mut buffer = [0u16; 256];
     let len = unsafe { GetWindowTextW(GetForegroundWindow(), &mut buffer) } as usize;
     String::from_utf16_lossy(&buffer[..len])
+}
+
+/// A press on a shelf file: a drag takes it elsewhere (and off the shelf once it lands), a
+/// click opens it.
+fn press_shelf_file(hwnd: HWND, path: &std::path::Path, mut point: POINT) {
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut point);
+        if !DragDetect(hwnd, point).as_bool() {
+            ShellExecuteW(Some(hwnd), w!("open"), &HSTRING::from(path), None, None, SW_SHOWNORMAL);
+            return;
+        }
+    }
+    if shelf::drag_out(hwnd, path) {
+        APP.with(|cell| {
+            if let Some(app) = cell.try_borrow_mut().ok().as_deref_mut().and_then(Option::as_mut) {
+                app.shelf.items.retain(|item| item.path != path);
+                app.draw_shelf();
+            }
+        });
+    }
 }
 
 /// Brings a Claude session's window to the front: the first process up from its Claude

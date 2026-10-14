@@ -71,6 +71,60 @@ pub fn button(c: &Canvas, glyph: char, enabled: bool) -> Result<()> {
     c.icon(glyph, (0.0, 0.0, BUTTON, BUTTON), size, if enabled { TEXT } else { DISABLED })
 }
 
+// Shelf page: a row of up to five file tiles, a hint and "Temizle" under them.
+const TILE: (f32, f32) = (68.0, 72.0);
+const TILES: usize = 5;
+pub const SHELF_ICON: f32 = 44.0;
+const DROP: u32 = 0xFF0A84FF;
+/// "Temizle", in the page's lower right.
+pub const SHELF_CLEAR: (f32, f32, f32, f32) = (PAGE.0 - 90.0, PAGE.1 - 30.0, 72.0, 22.0);
+
+/// How many tiles show a file: all of them up to five, else four and a "+N" tile.
+pub fn shelf_shown(count: usize) -> usize {
+    if count > TILES {
+        TILES - 1
+    } else {
+        count
+    }
+}
+
+/// Where tile `i` of a shelf with `count` files sits: a row centered on the page.
+pub fn shelf_tile(i: usize, count: usize) -> (f32, f32, f32, f32) {
+    let tiles = count.min(TILES);
+    let left = (PAGE.0 - tiles as f32 * TILE.0) / 2.0;
+    (left + i as f32 * TILE.0, 10.0, TILE.0, TILE.1)
+}
+
+/// The files on the shelf, or where to drop them. `dropping` while files are dragged over.
+pub fn shelf_page(c: &Canvas, items: &[crate::shelf::Item], dropping: bool) -> Result<()> {
+    if dropping {
+        c.outline((10.0, 4.0, PAGE.0 - 20.0, PAGE.1 - 10.0), 14.0, 1.5, DROP, true)?;
+    }
+    if items.is_empty() {
+        let (title, color) = if dropping { ("Bırakın", TEXT) } else { ("Dosyaları buraya sürükleyin", DIM) };
+        c.icon('\u{E896}', (0.0, 18.0, PAGE.0, 32.0), 22.0, if dropping { DROP } else { DIM })?; // Download
+        c.text(title, (18.0, 54.0, PAGE.0 - 36.0, 22.0), 13.5, true, color, Align::Center)?;
+        return c.text("Rafta beklerler; sonra istediğiniz yere sürükleyin", (18.0, 76.0, PAGE.0 - 36.0, 18.0), 11.0, false, 0xFF636366, Align::Center);
+    }
+    let shown = shelf_shown(items.len());
+    let icon_at = |(x, y, w, _): (f32, f32, f32, f32)| (x + (w - SHELF_ICON) / 2.0, y, SHELF_ICON, SHELF_ICON);
+    for (i, item) in items.iter().take(shown).enumerate() {
+        let tile = shelf_tile(i, items.len());
+        match &item.icon {
+            Some(icon) => c.image(&icon.pixels, icon.size, icon_at(tile))?,
+            None => c.icon('\u{E8A5}', icon_at(tile), 28.0, DIM)?, // Document
+        }
+        c.text(&item.name, (tile.0 + 3.0, tile.1 + SHELF_ICON + 6.0, tile.2 - 6.0, 16.0), 10.5, false, TEXT, Align::Center)?;
+    }
+    if items.len() > shown {
+        let tile = shelf_tile(shown, items.len());
+        c.round_rect(icon_at(tile), 10.0, FAINT)?;
+        c.text(&format!("+{}", items.len() - shown), icon_at(tile), 14.0, true, TEXT, Align::Center)?;
+    }
+    c.text("Tıkla: aç · Sürükle: başka yere bırak", (18.0, SHELF_CLEAR.1, 240.0, SHELF_CLEAR.3), 11.0, false, 0xFF636366, Align::Left)?;
+    c.text("Temizle", SHELF_CLEAR, 11.5, true, DIM, Align::Right)
+}
+
 /// The closed island's two lines: a bold title and a dim line under it, `w` wide.
 pub fn two_lines(c: &Canvas, title: &str, detail: &str, w: f32, h: f32) -> Result<()> {
     if detail.is_empty() {
@@ -305,6 +359,19 @@ mod tests {
             *p = [200, 200, 200, 255];
         }
         assert!(!blank(&Art { size: 10, pixels: logo }));
+    }
+
+    #[test]
+    fn shelf_tiles_are_centered_and_fit() {
+        for count in 1..=8 {
+            let tiles = shelf_shown(count) + usize::from(count > shelf_shown(count));
+            let first = shelf_tile(0, count);
+            let last = shelf_tile(tiles - 1, count);
+            assert!((first.0 - (PAGE.0 - (last.0 + last.2))).abs() < 0.01, "{count} files: row not centered");
+            assert!(first.0 >= 18.0 && last.1 + last.3 <= SHELF_CLEAR.1, "{count} files: row does not fit");
+        }
+        assert_eq!(shelf_shown(5), 5);
+        assert_eq!(shelf_shown(6), 4); // four files and "+2"
     }
 
     #[test]

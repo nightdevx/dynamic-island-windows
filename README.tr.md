@@ -34,10 +34,14 @@
 
 - **Çalan müzik:** Windows medya kontrollerinde görünen her oynatıcı (Spotify, tarayıcılar, Medya Oynatıcı, Apple Music…). Şarkı, sanatçı, kapak ve ilerleme. Önceki, oynat/duraklat, sonraki, karıştır ve tekrar düğmeleri (oynatıcı destekliyorsa). İlerleme çubuğuna tıklayınca o yere atlar, fare tekerleği oynatıcılar arasında geçer. Müzik çalarken kapalı hapta küçük bir ekolayzer döner ve kenarında kapak renginde soluk bir parıltı olur.
 - **Claude Code:** açık oturumlar ve ne yaptıkları (çalışıyor, izin bekliyor, yanıt hazır), 5 saatlik ve haftalık plan limitleri. Seni bekleyen bir oturum kısa bir önizleme açar. Bir oturuma tıklamak onun penceresini öne getirir.
+- **Dosya rafı:** dosyaları island'a sürükleyin, rafında beklesinler; sonra oradan istediğiniz klasöre, e-postaya ya da sohbete sürükleyin. Dosyalarınız yerinden oynamaz: raf yalnızca nerede olduklarını hatırlar, bırakınca kopyalanır.
 - **Ses seviyesi:** sistem sesi değişince seviye kısa süre görünür.
 - **Mikrofon ve kamera:** bir uygulama kullanırken hap uzar ve ucunda nokta yanar: mikrofonda turuncu, kamerada yeşil.
 - **Yolunuza çıkmaz:** tam ekran uygulamalarda ve oyunlarda kendiliğinden gizlenir, diğer zamanlarda pencerelerin üstünde kalır.
 
+<p align="center">
+  <img src="docs/shelf.png" alt="Dosya rafı">
+</p>
 <p align="center">
   <img src="docs/peek.png" alt="Önizleme: izin bekleyen bir oturum">
   &nbsp;
@@ -61,8 +65,9 @@ Gereksinimler: Windows 10 (1809) veya Windows 11, 64 bit.
 
 ## Kullanım
 
-- Açmak için island'ın üzerine gelin ya da tıklayın. Üstteki sekmeler Müzik ve Claude arasında geçer.
+- Açmak için island'ın üzerine gelin ya da tıklayın. Üstteki sekmeler Müzik, Claude ve Raf arasında geçer.
 - Island'ın üzerinde fare tekerleği: başka oynatıcıya geçer.
+- Dosyaları island'a sürükleyin: rafa konur. Raftaki bir dosyaya tıklayınca açılır, bir yere sürükleyince oraya bırakılır ve raftan kalkar.
 - Island'a ya da tepsi simgesine sağ tık: başlangıçta çalıştır, ayarlar, çıkış.
 
 ### Ayarlar

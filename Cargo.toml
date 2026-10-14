@@ -1,6 +1,6 @@
 [package]
 name = "island"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 authors = ["nightdijital <iletisim@nightdijital.com>"]
 description = "Dynamic island for Windows"
@@ -46,8 +46,10 @@ features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_System_WinRT",
