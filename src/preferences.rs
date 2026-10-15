@@ -48,6 +48,8 @@ const CLASS: PCWSTR = w!("NightdijitalIslandSettings");
 const APP: char = '\u{ECAA}'; // AppIconDefault, before an app's name
 /// The hover delays offered, ms.
 const DELAYS: [(u32, &str, &str); 4] = [(0, "Anında", "Instant"), (150, "Kısa", "Short"), (300, "Normal", "Normal"), (700, "Uzun", "Long")];
+/// How long the Claude bubble may stay grown, seconds.
+const NEWS_TIMES: [(u32, &str, &str); 4] = [(5, "5 sn", "5 s"), (10, "10 sn", "10 s"), (15, "15 sn", "15 s"), (30, "30 sn", "30 s")];
 
 struct Theme {
     sidebar: u32,
@@ -154,7 +156,6 @@ impl Section {
 pub enum Switch {
     Autostart, // a registry value, not in the settings file
     Hover,
-    PrivacyDot,
     Equalizer,
     Glow,
     SongPeek,
@@ -171,7 +172,6 @@ impl Switch {
     fn get(self, s: &Settings) -> Option<bool> {
         Some(match self {
             Switch::Hover => s.expand_on_hover,
-            Switch::PrivacyDot => s.privacy_dot,
             Switch::Equalizer => s.equalizer,
             Switch::Glow => s.glow,
             Switch::SongPeek => s.song_peek,
@@ -188,7 +188,6 @@ impl Switch {
     pub fn flip(self, s: &mut Settings) -> bool {
         let field = match self {
             Switch::Hover => &mut s.expand_on_hover,
-            Switch::PrivacyDot => &mut s.privacy_dot,
             Switch::Equalizer => &mut s.equalizer,
             Switch::Glow => &mut s.glow,
             Switch::SongPeek => &mut s.song_peek,
@@ -224,6 +223,7 @@ pub enum Action {
     Section(Section),
     Toggle(Switch),
     Delay(u32),
+    NewsTime(u32), // seconds
     Language(Language),
     Pick(List), // opens the app picker
     Add(List, String),
@@ -402,10 +402,7 @@ impl Form<'_, '_> {
                         Row::Segments(tr("Bekleme süresi", "Delay"), delays, s.expand_on_hover),
                     ],
                     "",
-                )?;
-                let label = tr("Mikrofon ve kamera göstergesi", "Microphone and camera indicator");
-                let detail = tr("Kullanılırken island'da turuncu ya da yeşil bir nokta yanar", "An orange or green dot lights up on the island while in use");
-                self.group(tr("Gizlilik", "Privacy"), &[Row::Switch(Switch::PrivacyDot, label, detail, Switch::PrivacyDot.get(s))], "")
+                )
             }
             Section::Notifications => {
                 let previews = (
@@ -505,12 +502,14 @@ impl Form<'_, '_> {
                     None => tr("Claude Code bu bilgisayarda kurulu değil", "Claude Code is not installed on this computer"),
                     Some(_) => tr("Oturumlar ve kullanım limitleri island'da görünür", "Sessions and usage limits show on the island"),
                 };
-                let notify = tr("İzin isteyince ya da cevap bitince island kısa süre açılır", "Opens the island when Claude needs you or is done");
+                let notify = tr("İzin isteyince ya da cevap bitince yandaki baloncuk büyür", "The side bubble grows when Claude needs you or is done");
+                let times = NEWS_TIMES.into_iter().map(|(secs, turkish, english)| (tr(turkish, english), Action::NewsTime(secs), secs == s.claude_news_seconds)).collect();
                 self.group(
                     "",
                     &[
                         Row::Switch(Switch::Claude, tr("Claude Code bağlantısı", "Claude Code connection"), detail, m.claude),
-                        Row::Switch(Switch::ClaudePeek, tr("Bildirimler", "Notifications"), notify, Switch::ClaudePeek.get(s)),
+                        Row::Switch(Switch::ClaudePeek, tr("Durum baloncuğu", "Status bubble"), notify, Switch::ClaudePeek.get(s)),
+                        Row::Segments(tr("Gösterim süresi", "Shown for"), times, s.claude_peek),
                     ],
                     tr(
                         "Bağlantı, Claude Code ayarlarına island'ın kancalarını ve durum satırını ekler; kapatınca geri alır.",
@@ -1159,12 +1158,11 @@ mod tests {
                         Action::Toggle(Switch::Autostart),
                         Action::Language(Language::English),
                         Action::Delay(300),
-                        Action::Toggle(Switch::PrivacyDot),
                     ],
                     Section::Fullscreen => vec![Action::Remove(List::Hide, 0), Action::Pick(List::Hide), Action::Pick(List::Show)],
                     Section::Music => vec![Action::Toggle(Switch::Equalizer), Action::Toggle(Switch::VolumePeek)],
                     Section::Liked => vec![Action::Search(1), Action::Unlike(1)],
-                    Section::Claude => vec![Action::Toggle(Switch::Claude), Action::Toggle(Switch::ClaudePeek)],
+                    Section::Claude => vec![Action::Toggle(Switch::Claude), Action::Toggle(Switch::ClaudePeek), Action::NewsTime(15)],
                     Section::Shelf => vec![Action::Toggle(Switch::Screenshots)],
                     Section::Notifications => vec![Action::Toggle(Switch::Notifications), Action::Toggle(Switch::DoNotDisturb)],
                     Section::About => vec![Action::Open(Link::Website), Action::Open(Link::Log)],
@@ -1192,7 +1190,6 @@ mod tests {
     fn switches_flip_their_own_setting() {
         let all = [
             Switch::Hover,
-            Switch::PrivacyDot,
             Switch::Equalizer,
             Switch::Glow,
             Switch::SongPeek,

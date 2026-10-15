@@ -12,7 +12,6 @@ mod notices;
 mod pages;
 mod player;
 mod preferences;
-mod privacy;
 mod render;
 mod settings;
 mod shelf;

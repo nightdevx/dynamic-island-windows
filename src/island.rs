@@ -49,35 +49,32 @@ const HOVER: (f32, f32) = (6.0, 2.0); // the closed pill grows this much under t
 const SHADOW: [f32; 3] = [14.0, 8.0, 3.5];
 const SHADOW_ALPHA: u32 = 0x12;
 
-// Compact: a lead (Claude's mark, or the art), two lines of text, and the line's own item on
-// the right (the 5-hour limit ring, or the equalizer). Both lines' text surfaces span from
-// TEXT_X to the pill's end.
-const MARK: f32 = 20.0;
+// Compact: while a song is on (playing or paused), the art, two lines of text and the equalizer on the right (the
+// text's surface spans from TEXT_X to the pill's end); otherwise an empty pill, IDLE wide.
+const IDLE: f32 = 200.0;
 const TEXT_X: f32 = 46.0;
 const LINES: (f32, f32) = (COMPACT.0 - TEXT_X, COMPACT.1);
 const SMALL_ART: f32 = 30.0;
-/// Right padding: the line's own item (the ring) is centered in the pill's round end, as the
-/// lead item (mark or art) is in the other end.
+/// Right padding: as far from the pill's end as a ring centered in its round end, as the art
+/// is in the other end.
 const EDGE: f32 = COMPACT.1 / 2.0 - pages::RING / 2.0;
 const GAP: f32 = 8.0; // between the text and the item after it
 const BARS: usize = 4;
 const BAR_W: f32 = 3.0;
 const BAR_H: f32 = 14.0;
+const PAUSED_BAR: f32 = 0.25; // of BAR_H: every bar, while the song is paused
 const BARS_W: f32 = BARS as f32 * (BAR_W + 3.0) - 3.0;
 
 /// Where the line's own item ends, from the pill's left.
 const ITEMS_END: f32 = COMPACT.0 - EDGE;
 
-// Microphone/camera in use: the closed pill grows this much and shows a dot at its right end.
-const PRIVACY_EXTRA: f32 = 24.0;
-const DOT: f32 = 7.0;
 
 // Expanded: tab bar on top, the selected page below it.
 const TAB_W: f32 = 82.0;
 const TAB_H: f32 = 24.0;
 const TAB_Y: f32 = 10.0;
 const PAGE_Y: f32 = 40.0;
-/// The settings button, right of the tabs and left of the privacy dot.
+/// The settings button, right of the tabs.
 const GEAR: (f32, f32, f32, f32) = (EXPANDED.0 - 64.0, TAB_Y, 30.0, TAB_H);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,7 +110,7 @@ impl Tab {
 /// What the closed island shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Line {
-    Claude,
+    Idle, // no song, playing or paused: an empty pill
     Music,
 }
 
@@ -138,14 +135,16 @@ pub enum Hit {
     NextPlayer, // the player line, with more than one player
 }
 
-// While music plays, the 5-hour limit moves out of the closed pill into a bubble beside it, as a
-// second activity does on the iPhone. A circle as tall as the pill.
+// Claude lives in a bubble beside the closed pill, as a second activity does on the iPhone: a
+// circle as tall as the pill with the 5-hour limit, which grows for a while when a session
+// needs the user or is done.
 const BUBBLE: f32 = COMPACT.1;
+const BUBBLE_NEWS: f32 = 210.0; // grown
 const BUBBLE_GAP: f32 = 6.0;
-/// The widest the island gets: open, or closed at its widest with the bubble on the right
-/// (the pill stays centered, so as much room on the left).
+/// The widest the island gets: open, or closed at its widest with the grown bubble on the
+/// right (the pill stays centered, so as much room on the left).
 const WIDEST: f32 = {
-    let closed = COMPACT.0 + PRIVACY_EXTRA + HOVER.0 + 2.0 * (BUBBLE_GAP + BUBBLE);
+    let closed = COMPACT.0 + HOVER.0 + 2.0 * (BUBBLE_GAP + BUBBLE_NEWS);
     if closed > EXPANDED.0 { closed } else { EXPANDED.0 }
 };
 
@@ -186,10 +185,6 @@ pub struct Island {
     blurs: [CompositionEffectBrush; 3],
     transitions: Arc<AtomicUsize>,
     compact: LayerVisual,
-    claude_line: ContainerVisual,
-    mark: SpriteVisual,
-    mark_surface: CompositionDrawingSurface,
-    line_surface: CompositionDrawingSurface,
     music_line: ContainerVisual,
     title_surface: CompositionDrawingSurface,
     title_text: SpriteVisual,
@@ -207,6 +202,7 @@ pub struct Island {
     tint_stops: [CompositionColorGradientStop; 2],
     tinted: bool,                         // the art has a color to wash with
     present: bool,                        // something plays
+    paused: bool,                         // and it is paused
     peek: LayerVisual,
     peek_surface: CompositionDrawingSurface,
     notice_icon: SpriteVisual, // a notification's icon, which pops in
@@ -229,16 +225,19 @@ pub struct Island {
     liked: Option<bool>, // None: no heart (nothing plays)
     players: u32,        // media sessions there are
     bubble_surface: CompositionDrawingSurface,
+    bubble_ring: SpriteVisual,
     bubble_limit: Option<(f32, u32)>, // the 5-hour limit it shows: used percent, color
     bubble_out: bool,                 // beside the pill, not inside it
+    spark: SpriteVisual,              // Claude's mark, in the bubble while it tells news
+    spark_surface: CompositionDrawingSurface,
+    news_text: SpriteVisual,
+    news_surface: CompositionDrawingSurface,
+    news: bool, // the bubble is grown
     shelf_view: (usize, usize, usize), // the shelf page's first item, items on screen, all items
-    privacy_brush: CompositionColorBrush,
-    privacy_dots: [SpriteVisual; 2], // closed pill, tab bar
-    extra: f32,                      // width the closed pill gives the privacy dot, DIPs
     peek_h: f32, // a peek's height: one line, or a notification
     tab: Tab,
     line: Line,
-    equalizer: bool,
+    still: Option<bool>, // the bars rest (Some: low and even when paused) or move (None)
     glowing: bool,
 }
 
@@ -296,7 +295,7 @@ impl Island {
         // One geometry is both the black pill and the clip of the content. Springs move only
         // W and H (WinRT can't box a Vector2 for a vector spring); Size, Offset and
         // CornerRadius are expressions of them, evaluated in the compositor.
-        let compact_px = px(COMPACT);
+        let compact_px = px((IDLE, COMPACT.1)); // nothing plays yet
         let size = compositor.CreatePropertySet()?;
         size.InsertScalar(h!("W"), compact_px.X)?;
         size.InsertScalar(h!("H"), compact_px.Y)?;
@@ -346,34 +345,53 @@ impl Island {
         glow.SetOpacity(0.0)?;
         root.Children()?.InsertAtTop(&glow)?;
 
-        // The limit bubble. "S" in the pill's property set says where it is: 0 inside the pill's
-        // right end (hidden), 1 beside it; position, size and opacity follow S and the pill's size.
+        // The Claude bubble. "S" in the pill's property set says where it is: 0 inside the
+        // pill's right end (hidden), 1 beside it; position, size and opacity follow S and the
+        // pill's size. "E" is its width: a circle, or grown into a capsule to tell news.
         size.InsertScalar(h!("S"), 0.0)?;
         let bubble_px = px((BUBBLE, BUBBLE));
+        size.InsertScalar(h!("E"), bubble_px.X)?;
+        let grown_px = px((BUBBLE_NEWS, BUBBLE));
         let bubble = compositor.CreateContainerVisual()?;
-        bubble.SetSize(bubble_px)?;
+        bubble.SetSize(grown_px)?;
         bubble.SetCenterPoint(Vector3 { X: bubble_px.X / 2.0, Y: bubble_px.Y / 2.0, Z: 0.0 })?;
-        let disc = compositor.CreateEllipseGeometry()?;
-        disc.SetCenter(Vector2 { X: bubble_px.X / 2.0, Y: bubble_px.Y / 2.0 })?;
-        disc.SetRadius(Vector2 { X: bubble_px.X / 2.0, Y: bubble_px.Y / 2.0 })?;
+        let capsule = compositor.CreateRoundedRectangleGeometry()?;
+        capsule.SetCornerRadius(Vector2 { X: bubble_px.X / 2.0, Y: bubble_px.Y / 2.0 })?;
+        let stretch = compositor.CreateExpressionAnimationWithExpression(h!("Vector2(P.E, B)"))?;
+        stretch.SetReferenceParameter(h!("P"), &size)?;
+        stretch.SetScalarParameter(h!("B"), bubble_px.Y)?;
+        capsule.StartAnimation(h!("Size"), &stretch)?;
         let disc_visual = compositor.CreateShapeVisual()?;
-        disc_visual.SetSize(bubble_px)?;
+        disc_visual.SetSize(grown_px)?;
         for width in SHADOW {
-            let ring = compositor.CreateSpriteShapeWithGeometry(&disc)?;
+            let ring = compositor.CreateSpriteShapeWithGeometry(&capsule)?;
             ring.SetStrokeBrush(&shadow_brush)?;
             ring.SetStrokeThickness(width * scale)?;
             ring.SetOffset(Vector2 { X: 0.0, Y: scale })?;
             disc_visual.Shapes()?.Append(&ring)?;
         }
-        let disc_fill = compositor.CreateSpriteShapeWithGeometry(&disc)?;
+        let disc_fill = compositor.CreateSpriteShapeWithGeometry(&capsule)?;
         disc_fill.SetFillBrush(&compositor.CreateColorBrushWithColor(argb(0xFF000000))?)?;
         disc_visual.Shapes()?.Append(&disc_fill)?;
         bubble.Children()?.InsertAtTop(&disc_visual)?;
+        // What it shows, cut to the capsule as it grows: the limit ring, or Claude's mark with
+        // the news beside it.
+        let inside = compositor.CreateContainerVisual()?;
+        inside.SetSize(grown_px)?;
+        inside.SetClip(&compositor.CreateGeometricClipWithGeometry(&capsule)?)?;
+        bubble.Children()?.InsertAtTop(&inside)?;
         let bubble_surface = painter.surface((BUBBLE, BUBBLE))?;
-        let bubble_ring = compositor.CreateSpriteVisual()?;
-        bubble_ring.SetBrush(&compositor.CreateSurfaceBrushWithSurface(&bubble_surface)?)?;
-        bubble_ring.SetSize(bubble_px)?;
-        bubble.Children()?.InsertAtTop(&bubble_ring)?;
+        let bubble_ring = sprite(&surface_brush(&bubble_surface)?, at(0.0, 0.0), (BUBBLE, BUBBLE))?;
+        inside.Children()?.InsertAtTop(&bubble_ring)?;
+        let spark_surface = painter.surface((BUBBLE, BUBBLE))?;
+        let spark = sprite(&surface_brush(&spark_surface)?, at(0.0, 0.0), (BUBBLE, BUBBLE))?;
+        spark.SetOpacity(0.0)?;
+        inside.Children()?.InsertAtTop(&spark)?;
+        let news_size = (BUBBLE_NEWS - BUBBLE, BUBBLE);
+        let news_surface = painter.surface(news_size)?;
+        let news_text = sprite(&surface_brush(&news_surface)?, at(BUBBLE - 4.0, 0.0), news_size)?;
+        news_text.SetOpacity(0.0)?;
+        inside.Children()?.InsertAtTop(&news_text)?;
         for (property, expression) in [
             ("Offset", "Vector3((Window + P.W) * 0.5 + Gap - (1 - P.S) * (Gap + B), Top + (P.H - B) * 0.5, 0)"),
             ("Scale", "Vector3(0.5 + 0.5 * P.S, 0.5 + 0.5 * P.S, 1)"),
@@ -431,32 +449,15 @@ impl Island {
             tint_brush.ColorStops()?.Append(stop)?;
         }
 
-        // Compact. Its content keeps to the pill's left edge while the pill grows for the
-        // privacy dot, but not beyond that width: on the way to a bigger view it fades in place.
+        // Compact. Its content keeps to the pill's left edge as the pill changes width, up to
+        // the music line's: on the way to a bigger view it fades in place.
         let compact = layer(corner(COMPACT), COMPACT)?;
         let follow = compositor.CreateExpressionAnimationWithExpression(h!("Vector3(Round((Window - Min(P.W, Widest)) * 0.5), Top, 0)"))?;
         follow.SetReferenceParameter(h!("P"), &size)?;
         follow.SetScalarParameter(h!("Window"), window.X)?;
-        follow.SetScalarParameter(h!("Widest"), px((COMPACT.0 + PRIVACY_EXTRA, 0.0)).X)?;
+        follow.SetScalarParameter(h!("Widest"), px((COMPACT.0, 0.0)).X)?;
         follow.SetScalarParameter(h!("Top"), (TOP * scale).round())?;
         compact.StartAnimation(h!("Offset"), &follow)?;
-        let privacy_brush = compositor.CreateColorBrush()?;
-        let privacy_brush_base: CompositionBrush = privacy_brush.cast()?;
-        let dot = |center: (f32, f32)| -> Result<SpriteVisual> {
-            let visual = sprite(&privacy_brush_base, at(center.0 - DOT / 2.0, center.1 - DOT / 2.0), (DOT, DOT))?;
-            rounded(&visual.cast()?, (DOT, DOT), DOT / 2.0)?;
-            visual.SetOpacity(0.0)?;
-            Ok(visual)
-        };
-        let compact_dot = dot((COMPACT.0 + PRIVACY_EXTRA - COMPACT.1 / 2.0, COMPACT.1 / 2.0))?;
-        compact.Children()?.InsertAtTop(&compact_dot)?;
-        let claude_line = container(at(0.0, 0.0), COMPACT)?;
-        let mark_surface = painter.surface((MARK, MARK))?;
-        let mark = sprite(&surface_brush(&mark_surface)?, at((COMPACT.1 - MARK) / 2.0, (COMPACT.1 - MARK) / 2.0), (MARK, MARK))?;
-        claude_line.Children()?.InsertAtTop(&mark)?;
-        let line_surface = painter.surface(LINES)?;
-        claude_line.Children()?.InsertAtTop(&sprite(&surface_brush(&line_surface)?, at(TEXT_X, 0.0), LINES)?)?;
-        compact.Children()?.InsertAtTop(&claude_line)?;
 
         let music_line = container(at(0.0, 0.0), COMPACT)?;
         music_line.SetOpacity(0.0)?;
@@ -544,8 +545,6 @@ impl Island {
             c.icon('\u{E713}', GEAR, 13.0, pages::DIM) // Setting
         })?;
         expanded.Children()?.InsertAtTop(&sprite(&surface_brush(&header_surface)?, at(0.0, 0.0), (EXPANDED.0, PAGE_Y))?)?;
-        let expanded_dot = dot((EXPANDED.0 - 24.0, TAB_Y + TAB_H / 2.0))?;
-        expanded.Children()?.InsertAtTop(&expanded_dot)?;
 
         let page_surfaces = [painter.surface(PAGE)?, painter.surface(PAGE)?, painter.surface(PAGE)?];
         let pages = [container(at(0.0, PAGE_Y), PAGE)?, container(at(0.0, PAGE_Y), PAGE)?, container(at(0.0, PAGE_Y), PAGE)?];
@@ -648,10 +647,6 @@ impl Island {
             blurs,
             transitions: Arc::new(AtomicUsize::new(0)),
             compact,
-            claude_line,
-            mark,
-            mark_surface,
-            line_surface,
             music_line,
             title_surface,
             title_text,
@@ -668,6 +663,7 @@ impl Island {
             tint_stops,
             tinted: false,
             present: false,
+            paused: false,
             peek,
             peek_surface,
             notice_icon,
@@ -689,16 +685,19 @@ impl Island {
             liked: None,
             players: 0,
             bubble_surface,
+            bubble_ring,
             bubble_limit: None,
             bubble_out: false,
+            spark,
+            spark_surface,
+            news_text,
+            news_surface,
+            news: false,
             shelf_view: (0, 0, 0),
-            privacy_brush,
-            privacy_dots: [compact_dot, expanded_dot],
-            extra: 0.0,
             peek_h: PEEK.1,
             tab: Tab::Music,
-            line: Line::Claude,
-            equalizer: false,
+            line: Line::Idle,
+            still: Some(false),
             glowing: false,
         };
         island.set_media(None, 0)?;
@@ -711,10 +710,10 @@ impl Island {
         self.tab
     }
 
-    /// The pill's size in a view, DIPs: the closed pill is wider while it shows the privacy dot.
+    /// The pill's size in a view, DIPs: the closed pill is narrow while there is no song.
     pub fn size_of(&self, view: View) -> (f32, f32) {
         let (w, h) = match view {
-            View::Compact => (COMPACT.0 + self.extra, COMPACT.1),
+            View::Compact => (if self.line == Line::Music { COMPACT.0 } else { IDLE }, COMPACT.1),
             View::Peek => (PEEK.0, self.peek_h),
             _ => view.size(),
         };
@@ -737,19 +736,6 @@ impl Island {
     /// but nothing blurs, rises or grows under the mouse.
     pub fn set_full_motion(&mut self, on: bool) {
         self.full_motion = on;
-    }
-
-    /// The microphone/camera dot in `color`, or none. The window springs the pill to its new
-    /// width with `animate`.
-    pub fn set_privacy(&mut self, color: Option<u32>) -> Result<()> {
-        if let Some(color) = color {
-            self.privacy_brush.SetColor(argb(color))?;
-        }
-        self.extra = if color.is_some() { PRIVACY_EXTRA } else { 0.0 };
-        for dot in &self.privacy_dots {
-            self.crossfade(&dot.cast()?, color.is_some(), 200)?;
-        }
-        Ok(())
     }
 
     /// Starts the transition; the returned batch completes when every animation has settled.
@@ -1020,7 +1006,7 @@ impl Island {
             None => ("", ""),
         };
         let w = ITEMS_END - BARS_W - GAP - TEXT_X;
-        self.painter.draw(&self.title_surface, |c| pages::two_lines(c, title, detail, w, COMPACT.1))?;
+        self.painter.draw(&self.title_surface, |c| pages::two_lines(c, title, detail, TEXT, w, COMPACT.1))?;
         self.draw_times(media, now_ms)?;
         let enabled = |f: fn(&Media) -> bool| media.is_some_and(f);
         let glyphs = [
@@ -1052,6 +1038,7 @@ impl Island {
         self.crossfade(&self.buttons[1].cast()?, present && !playing, 140)?;
         self.crossfade(&self.buttons[2].cast()?, playing, 140)?;
         self.present = present;
+        self.paused = present && !playing;
         self.players = media.map_or(0, |m| m.sessions);
         self.show_tint()
     }
@@ -1143,31 +1130,32 @@ impl Island {
         Ok(())
     }
 
-    /// Which line the closed island shows. `moving` (music playing, island closed and on
-    /// screen) keeps the equalizer going; see `bar_heights`. `glow` allows the music glow.
+    /// What the closed island shows; the window springs it to its new width. `moving` (music
+    /// playing, island closed and on screen) keeps the equalizer going; see `bar_heights`.
+    /// `glow` allows the music glow.
     pub fn set_line(&mut self, line: Line, moving: bool, glow: bool) -> Result<()> {
         if line != self.line {
             self.line = line;
-            self.crossfade(&self.claude_line.cast()?, line == Line::Claude, 180)?;
             self.crossfade(&self.music_line.cast()?, line == Line::Music, 180)?;
-            self.place_bubble()?;
         }
         let glowing = glow && line == Line::Music;
         if glowing != self.glowing {
             self.glowing = glowing;
             self.crossfade(&self.glow.cast()?, glowing, 400)?;
         }
-        if moving == self.equalizer {
+        // Resting bars stand low and even while the song is paused.
+        let still = (!moving).then_some(self.paused);
+        if still == self.still {
             return Ok(());
         }
-        self.equalizer = moving;
+        self.still = still;
         // Steps, not a smooth motion: DWM draws a frame only when a value changes, so 6
         // steps a second cost ~0.4% of the iGPU while smooth bars cost ~5% (measured).
         let step = self.compositor.CreateStepEasingFunction()?;
         for (i, bar) in self.bars.iter().enumerate() {
-            if !moving {
+            if let Some(paused) = still {
                 bar.StopAnimation(h!("Scale.Y"))?;
-                bar.SetScale(Vector3 { X: 1.0, Y: bar_height(i, 0), Z: 1.0 })?;
+                bar.SetScale(Vector3 { X: 1.0, Y: if paused { PAUSED_BAR } else { bar_height(i, 0) }, Z: 1.0 })?;
                 continue;
             }
             let wave = self.compositor.CreateScalarKeyFrameAnimation()?;
@@ -1281,22 +1269,6 @@ impl Island {
         Ok(())
     }
 
-    /// The Claude line: the mark in `mark_color`, a status over what it is about, and the
-    /// ring of the 5-hour limit (percent left, its color).
-    pub fn draw_compact(&self, status: &str, detail: &str, limit: Option<(f32, u32)>, mark_color: u32) -> Result<()> {
-        self.painter.draw(&self.mark_surface, |c| c.spark((MARK / 2.0, MARK / 2.0), MARK / 2.0, mark_color))?;
-        // In the surface's coordinates, which start at TEXT_X.
-        let end = ITEMS_END - TEXT_X;
-        self.painter.draw(&self.line_surface, |c| {
-            let text_w = if limit.is_some() { end - pages::RING - GAP } else { end };
-            pages::two_lines(c, status, detail, text_w, COMPACT.1)?;
-            match limit {
-                Some((left, color)) => pages::limit_ring(c, (end - pages::RING / 2.0, COMPACT.1 / 2.0), left, color),
-                None => Ok(()),
-            }
-        })
-    }
-
     /// The 5-hour limit for the bubble (used percent and its color), drawn when it changes.
     pub fn set_bubble(&mut self, limit: Option<(f32, u32)>) -> Result<()> {
         if limit != self.bubble_limit {
@@ -1308,10 +1280,64 @@ impl Island {
         self.place_bubble()
     }
 
-    /// The bubble comes out beside the closed pill while it shows music and there is a limit
-    /// to show, and goes back into it otherwise (as the pill opens, it takes the bubble in).
+    /// Grows the bubble to tell `news` (a status, what it is about, the status's color), or
+    /// takes it back to the limit ring. The returned batch completes when it has settled.
+    pub fn set_news(&mut self, news: Option<(&str, &str, u32)>) -> Result<CompositionScopedBatch> {
+        let batch = self.compositor.CreateScopedBatch(CompositionBatchTypes::Animation)?;
+        if let Some((status, about, color)) = news {
+            self.painter.draw(&self.spark_surface, |c| c.spark((BUBBLE / 2.0, BUBBLE / 2.0), 10.0, color))?;
+            self.painter.draw(&self.news_surface, |c| pages::two_lines(c, status, about, color, BUBBLE_NEWS - BUBBLE - 12.0, BUBBLE))?;
+        }
+        let grown = news.is_some();
+        let (changed, was_out) = (grown != self.news, self.bubble_out);
+        self.news = grown;
+        self.place_bubble()?;
+        if changed {
+            let spring = self.compositor.CreateSpringScalarAnimation()?;
+            spring.SetDampingRatio(0.8)?;
+            spring.SetPeriod(ms(70))?;
+            let width = self.painter.px((if grown { BUBBLE_NEWS } else { BUBBLE }, 0.0)).X;
+            spring.SetFinalValue(&PropertyValue::CreateSingle(width)?.cast::<IReference<f32>>()?)?;
+            if grown && !was_out {
+                spring.SetDelayTime(ms(200))?; // once it is out
+            }
+            self.size.StartAnimation(h!("E"), &spring)?;
+            // The words come once there is room for them and go before it closes; the mark
+            // takes the ring's place meanwhile.
+            let words = self.compositor.CreateScalarKeyFrameAnimation()?;
+            words.InsertKeyFrameWithEasingFunction(1.0, if grown { 1.0 } else { 0.0 }, &self.easing)?;
+            words.SetDuration(ms(if grown { 260 } else { 120 }))?;
+            if grown {
+                words.SetDelayTime(ms(if was_out { 140 } else { 340 }))?;
+            }
+            self.news_text.StartAnimation(h!("Opacity"), &words)?;
+            self.crossfade(&self.spark.cast()?, grown, 200)?;
+            self.crossfade(&self.bubble_ring.cast()?, !grown, 200)?;
+        }
+        if grown && self.full_motion {
+            // Three beats of the mark.
+            let beat = self.compositor.CreateVector3KeyFrameAnimation()?;
+            beat.InsertKeyFrame(0.0, Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
+            beat.InsertKeyFrameWithEasingFunction(0.4, Vector3 { X: 1.3, Y: 1.3, Z: 1.0 }, &self.easing)?;
+            beat.InsertKeyFrameWithEasingFunction(1.0, Vector3 { X: 1.0, Y: 1.0, Z: 1.0 }, &self.easing)?;
+            beat.SetDuration(ms(650))?;
+            beat.SetDelayTime(ms(200))?;
+            beat.SetIterationBehavior(AnimationIterationBehavior::Count)?;
+            beat.SetIterationCount(3)?;
+            self.spark.StartAnimation(h!("Scale"), &beat)?;
+        }
+        batch.End()?;
+        Ok(batch)
+    }
+
+    pub fn has_news(&self) -> bool {
+        self.news
+    }
+
+    /// The bubble comes out beside the closed pill while it has a limit or news to show, and
+    /// goes back into it otherwise (as the pill opens, it takes the bubble in).
     fn place_bubble(&mut self) -> Result<()> {
-        let out = self.bubble_limit.is_some() && self.line == Line::Music && self.view == View::Compact;
+        let out = (self.bubble_limit.is_some() || self.news) && self.view == View::Compact;
         if out == self.bubble_out {
             return Ok(());
         }
@@ -1326,10 +1352,18 @@ impl Island {
         self.size.StartAnimation(h!("S"), &spring)
     }
 
+    fn bubble_width(&self) -> f32 {
+        if self.news {
+            BUBBLE_NEWS
+        } else {
+            BUBBLE
+        }
+    }
+
     /// DIPs the bubble takes right of the pill, for the window's clickable area.
     pub fn bubble_extent(&self) -> f32 {
         if self.bubble_out {
-            BUBBLE_GAP + BUBBLE
+            BUBBLE_GAP + self.bubble_width()
         } else {
             0.0
         }
@@ -1339,19 +1373,7 @@ impl Island {
     pub fn on_bubble(&self, x: i32, y: i32) -> bool {
         let left = (self.window.X + self.motion[0].to) / 2.0 + BUBBLE_GAP * self.scale;
         let (x, y) = (x as f32, y as f32 / self.scale - TOP);
-        self.bubble_out && (left..left + BUBBLE * self.scale).contains(&x) && (0.0..BUBBLE).contains(&y)
-    }
-
-    /// Three beats of the mark when a session starts waiting on the user.
-    pub fn pulse_mark(&self) -> Result<()> {
-        let beat = self.compositor.CreateVector3KeyFrameAnimation()?;
-        beat.InsertKeyFrame(0.0, Vector3 { X: 1.0, Y: 1.0, Z: 1.0 })?;
-        beat.InsertKeyFrameWithEasingFunction(0.4, Vector3 { X: 1.35, Y: 1.35, Z: 1.0 }, &self.easing)?;
-        beat.InsertKeyFrameWithEasingFunction(1.0, Vector3 { X: 1.0, Y: 1.0, Z: 1.0 }, &self.easing)?;
-        beat.SetDuration(ms(650))?;
-        beat.SetIterationBehavior(AnimationIterationBehavior::Count)?;
-        beat.SetIterationCount(3)?;
-        self.mark.StartAnimation(h!("Scale"), &beat)
+        self.bubble_out && (left..left + self.bubble_width() * self.scale).contains(&x) && (0.0..BUBBLE).contains(&y)
     }
 }
 
@@ -1453,12 +1475,11 @@ mod tests {
         assert_eq!(tab_left(Tab::Claude) + TAB_W / 2.0, EXPANDED.0 / 2.0);
         assert_eq!(tab_left(Tab::Music) + TAB_W, tab_left(Tab::Claude));
         assert_eq!(tab_left(Tab::Claude) + TAB_W, tab_left(Tab::Shelf));
-        // Clear of the privacy dot at the right end of the tab bar, and of the settings button.
-        assert!(tab_left(Tab::Shelf) + TAB_W <= EXPANDED.0 - 34.0);
-        assert!(GEAR.0 >= tab_left(Tab::Shelf) + TAB_W && GEAR.0 + GEAR.2 <= EXPANDED.0 - 24.0 - DOT / 2.0 - 2.0);
-        // The bubble beside the widest closed pill stays in the window.
-        let closed = COMPACT.0 + PRIVACY_EXTRA + HOVER.0;
-        assert!(WIDEST / 2.0 >= closed / 2.0 + BUBBLE_GAP + BUBBLE);
+        // Clear of the settings button, which keeps clear of the round end.
+        assert!(GEAR.0 >= tab_left(Tab::Shelf) + TAB_W && GEAR.0 + GEAR.2 <= EXPANDED.0 - 24.0);
+        // The grown bubble beside the widest closed pill stays in the window.
+        let closed = COMPACT.0 + HOVER.0;
+        assert!(WIDEST / 2.0 >= closed / 2.0 + BUBBLE_GAP + BUBBLE_NEWS);
     }
 
     #[test]
@@ -1476,13 +1497,9 @@ mod tests {
 
     #[test]
     fn closed_pill_leaves_room_for_text() {
-        // The Claude line's text next to the ring, the music line's next to the equalizer.
-        assert!(ITEMS_END - pages::RING - GAP - TEXT_X >= 150.0, "text squeezed by the ring");
+        // The music line's text next to the equalizer.
         assert!(ITEMS_END - BARS_W - GAP - TEXT_X >= 150.0, "text squeezed by the equalizer");
-        // The privacy dot clears the line's items.
-        let dot_left = COMPACT.0 + PRIVACY_EXTRA - COMPACT.1 / 2.0 - DOT / 2.0;
-        assert!(dot_left >= ITEMS_END + 4.0);
-        // Both ends' items share the center of the round end they sit in.
-        assert_eq!(ITEMS_END - pages::RING / 2.0, COMPACT.0 - COMPACT.1 / 2.0);
+        // The grown bubble's words fit beside its mark.
+        assert!(BUBBLE_NEWS - BUBBLE - 12.0 >= 140.0);
     }
 }

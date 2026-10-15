@@ -6,6 +6,7 @@ use std::{
 use windows::{
     core::*,
     Foundation::TypedEventHandler,
+    UI::Composition::CompositionScopedBatch,
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
@@ -30,7 +31,6 @@ use crate::{
     media::{Command, Media, MediaLink},
     notices,
     preferences::{self, Preferences},
-    privacy,
     settings::{self, Settings},
     shelf::{self, DropTarget, Shelf},
     text::{self, tr},
@@ -39,9 +39,6 @@ use crate::{
 
 const LEAVE_MS: u32 = 400;
 const PEEK_MS: u32 = 2500;
-// Privacy dot colors, as on iPhone.
-const MICROPHONE: u32 = 0xFFFF9F0A;
-const CAMERA: u32 = 0xFF30D158;
 
 // Defined in Win32_UI_Controls; not worth a whole feature for two numbers.
 const WM_MOUSEHOVER: u32 = 0x02A1;
@@ -68,6 +65,7 @@ const PEEK_TIMER: usize = 3;
 const MINUTE_TIMER: usize = 4; // only while the Claude tab is on screen: reset countdowns
 const SECOND_TIMER: usize = 5; // only while the music page is on screen and playing: elapsed time
 const SHOT_TIMER: usize = 6; // after the screenshots folder changes
+const BUBBLE_TIMER: usize = 7; // while the Claude bubble is grown
 const SHOT_DELAY_MS: u32 = 400;
 // The shelf's two lists.
 const FILES: usize = 0;
@@ -106,13 +104,10 @@ struct App {
     sessions: Vec<Session>,
     limits: Limits,
     states: HashMap<String, State>, // last state seen per session, to spot transitions
-    seen: HashSet<String>,          // sessions waiting on the user that the user has already noticed
-    compact_line: Option<CompactLine>, // what the closed island shows now; redrawn only on change
     media: Option<MediaLink>,
     notices: Option<notices::Notices>,
     now_playing: Option<Media>,
     peek_tab: Tab, // the tab a peek opens to
-    privacy: privacy::InUse,
     volume: Option<audio::Volume>,
     last_volume: Option<(u32, bool)>, // shown or current level and mute
     shelves: [Shelf; 2], // FILES dropped on the island, SCREENSHOTS taken
@@ -124,9 +119,6 @@ struct App {
     preferences: Option<Preferences>,        // the settings window, while open
     region: RECT,                            // the clickable part of the window, as last set
 }
-
-/// Status, what it is about, 5-hour limit left and its color, color of the Claude mark.
-type CompactLine = (String, String, Option<(f32, u32)>, u32);
 
 /// `island.exe --shelf <files>`: puts the files on the running island's shelf. Explorer's
 /// "Send to → Dynamic Island" runs this with the selected files.
@@ -172,13 +164,10 @@ pub fn run() -> Result<()> {
         sessions: Vec::new(),
         limits: Limits::default(),
         states: HashMap::new(),
-        seen: HashSet::new(),
-        compact_line: None,
         media: None,
         notices: None,
         now_playing: None,
         peek_tab: Tab::Claude,
-        privacy: privacy::in_use(), // what was in use before we started is not news
         volume: None,
         last_volume: None,
         shelves: Default::default(),
@@ -248,7 +237,7 @@ fn message_loop() -> Result<()> {
         (claude::dir(), |app| app.reload_claude(true)),
         (shelf::screenshots_dir(), App::screenshots_changed),
     ];
-    let mut watches: Vec<Watch> = folders
+    let watches: Vec<Watch> = folders
         .into_iter()
         .filter_map(|(dir, action)| {
             let dir = dir?;
@@ -262,9 +251,6 @@ fn message_loop() -> Result<()> {
             Some((handle, rearm, action))
         })
         .collect();
-    if let Some(watch) = privacy::Watch::new() {
-        watches.push((watch.event(), Box::new(move || watch.arm()), App::reload_privacy));
-    }
     let handles: Vec<HANDLE> = watches.iter().map(|(h, _, _)| *h).collect();
     let mut msg = MSG::default();
     loop {
@@ -345,11 +331,9 @@ impl App {
                 island.set_media(media, claude::now_ms())?;
                 island.set_art(media.and_then(|m| m.art.as_deref()), false)?;
             }
-            self.compact_line = None;
             self.show_like();
-            self.show_claude_state(false);
+            self.show_limit();
             self.update_live();
-            self.show_privacy();
             log(format!("placed at scale {scale} on {}x{}", r.right - r.left, r.bottom - r.top));
         }
         self.set_region(self.pill_size());
@@ -362,7 +346,6 @@ impl App {
             return;
         }
         log(format!("settings: {new:?}"));
-        let privacy = new.privacy_dot != self.settings.privacy_dot;
         let language = new.language != self.settings.language;
         self.settings = new;
         if language {
@@ -378,9 +361,6 @@ impl App {
         }
         self.refresh(); // the exe lists may change what counts as "hide"
         self.update_live();
-        if privacy {
-            self.show_privacy();
-        }
         self.read_notices();
         self.draw_preferences();
     }
@@ -465,6 +445,7 @@ impl App {
                 switch.flip(&mut settings);
             }
             Action::Delay(ms) => settings.hover_delay_ms = ms,
+            Action::NewsTime(seconds) => settings.claude_news_seconds = seconds,
             Action::Language(language) => settings.language = language,
             Action::Add(list, exe) => {
                 let names = names(&mut settings, list);
@@ -533,22 +514,18 @@ impl App {
         self.draw_preferences();
     }
 
-    /// A Claude session waits on the user and they have not looked yet.
-    fn claude_needs_user(&self) -> bool {
-        self.sessions
-            .iter()
-            .any(|s| s.state == State::Permission || (s.state == State::Done && !self.seen.contains(&s.id)))
-    }
-
     /// Starts or stops what moves on its own: the equalizer (music playing, island closed
     /// and on screen), the progress fill and the clock (music page on screen and playing).
     /// Each costs frames or wakeups, so none runs where it cannot be seen.
     fn update_live(&mut self) {
         let playing = self.now_playing.as_ref().is_some_and(|m| m.playing);
-        let line = if playing && !self.claude_needs_user() { Line::Music } else { Line::Claude };
+        // A paused song stays on the closed pill too, with still bars.
+        let song = self.now_playing.as_ref().is_some_and(|m| m.playing || !m.title.is_empty());
+        let line = if song { Line::Music } else { Line::Idle };
         let motion = animations_enabled();
-        let equalizer = line == Line::Music && self.view == View::Compact && !self.hidden && self.settings.equalizer && motion;
+        let equalizer = playing && self.view == View::Compact && !self.hidden && self.settings.equalizer && motion;
         let now = claude::now_ms();
+        let before = self.pill_size();
         if let Some(island) = self.island.as_mut() {
             island.set_full_motion(motion);
             let updated = island.set_line(line, equalizer, self.settings.glow).and_then(|_| island.set_progress(self.now_playing.as_ref(), now));
@@ -556,7 +533,14 @@ impl App {
                 log(format!("live parts failed: {e}"));
             }
         }
-        self.set_region(self.pill_size()); // the bubble may have come out or gone in
+        // Music starting or stopping changes the closed pill's width.
+        if self.pill_size() != before {
+            if let Err(e) = self.reshape(before) {
+                log(format!("line resize failed: {e}"));
+            }
+        } else {
+            self.set_region(self.pill_size()); // the bubble may have come out or gone in
+        }
         self.arm_clock();
     }
 
@@ -577,8 +561,8 @@ impl App {
     }
 
     /// Reads the Claude Code state files. A session that starts waiting on the user (a
-    /// permission prompt, a finished answer) lights the dot and peeks, unless its window is
-    /// already in front or `notify` is off.
+    /// permission prompt, a finished answer) grows the bubble for a while, unless its window
+    /// is already in front or `notify` is off.
     fn reload_claude(&mut self, notify: bool) {
         let (sessions, limits) = claude::load();
         let front = foreground_title().to_lowercase();
@@ -588,21 +572,17 @@ impl App {
                 continue;
             }
             usage::refresh(); // Claude is in use, so the limits are moving (at most every 3 min)
-            self.seen.remove(&session.id);
             if matches!(session.state, State::Permission | State::Done) {
                 let in_front = !session.project.is_empty() && front.contains(&session.project.to_lowercase());
-                if in_front || !notify {
-                    self.seen.insert(session.id.clone());
-                } else if news.is_none_or(|n| n.state != State::Permission) {
+                if notify && !in_front && news.is_none_or(|n| n.state != State::Permission) {
                     news = Some(session);
                 }
             }
         }
         self.states = sessions.iter().map(|s| (s.id.clone(), s.state)).collect();
-        self.seen.retain(|id| self.states.contains_key(id));
-        let peek = news.filter(|_| self.settings.claude_peek).map(|s| {
-            let name = if s.project.is_empty() { "Claude" } else { &s.project };
-            (format!("{name} · {}", s.state.label()), s.state.color(), s.state == State::Permission)
+        let news = news.filter(|_| self.settings.claude_peek && !self.settings.do_not_disturb).map(|s| {
+            let about = if s.project.is_empty() { "Claude" } else { &s.project };
+            (s.state.headline().to_string(), about.to_string(), s.state.color())
         });
         self.sessions = sessions;
         self.limits = limits;
@@ -610,12 +590,12 @@ impl App {
         if self.view == View::Expanded && self.tab() == Some(Tab::Claude) {
             self.viewing_claude();
         } else {
-            self.show_claude_state(peek.as_ref().is_some_and(|p| p.2));
+            self.show_limit();
+            if news.is_some() {
+                self.show_news(news);
+            }
         }
         self.update_live();
-        if let Some((text, color, _)) = peek {
-            self.peek(Tab::Claude, PEEK_MS, |island| island.draw_peek(&text, Some(color)));
-        }
     }
 
     /// Opens the island a little for news, then closes it again after `ms`. Not over
@@ -658,77 +638,45 @@ impl App {
         self.peek(Tab::Music, VOLUME_MS, |island| island.draw_volume(level, muted));
     }
 
-    /// Reads which apps use the microphone and camera; one that just started peeks.
-    fn reload_privacy(&mut self) {
-        let now = privacy::in_use();
-        if now == self.privacy {
-            return;
-        }
-        log(format!("privacy: {now:?}"));
-        let started = |new: &Option<String>, old: &Option<String>| new.clone().filter(|_| old.is_none());
-        let news = started(&now.camera, &self.privacy.camera)
-            .map(|app| (tr(format!("Kamera kullanımda · {app}"), format!("Camera in use · {app}")), CAMERA))
-            .or_else(|| {
-                let app = started(&now.microphone, &self.privacy.microphone)?;
-                Some((tr(format!("Mikrofon kullanımda · {app}"), format!("Microphone in use · {app}")), MICROPHONE))
-            });
-        self.privacy = now;
-        self.show_privacy();
-        if let Some((text, color)) = news.filter(|_| self.settings.privacy_dot) {
-            let tab = self.tab().unwrap_or(Tab::Music);
-            self.peek(tab, PEEK_MS, |island| island.draw_peek(&text, Some(color)));
+    /// The bubble's 5-hour limit ring.
+    fn show_limit(&mut self) {
+        // ponytail: a limit that resets while nothing happens shows 0 only at the next event
+        let limit = claude::five_hour_used(&self.limits, claude::now_ms() / 1000);
+        if let Some(Err(e)) = self.island.as_mut().map(|island| island.set_bubble(limit)) {
+            log(format!("limit bubble failed: {e}"));
         }
     }
 
-    /// The privacy dot: green for the camera (which usually comes with the microphone),
-    /// orange for the microphone alone. The closed pill grows to make room for it.
-    fn show_privacy(&mut self) {
-        let color = if !self.settings.privacy_dot {
-            None
-        } else if self.privacy.camera.is_some() {
-            Some(CAMERA)
-        } else {
-            self.privacy.microphone.as_ref().map(|_| MICROPHONE)
-        };
-        let before = self.pill_size();
+    /// Grows the Claude bubble with `news` (a status, what it is about, its color) for the
+    /// time the settings give it, or takes it back to the limit ring. The clickable area grows
+    /// before the bubble does and shrinks after it.
+    fn show_news(&mut self, news: Option<(String, String, u32)>) {
         let Some(island) = self.island.as_mut() else { return };
-        if let Err(e) = island.set_privacy(color) {
-            log(format!("privacy dot failed: {e}"));
-        }
-        if self.view == View::Compact {
-            if let Err(e) = self.reshape(before) {
-                log(format!("privacy resize failed: {e}"));
+        let grows = news.is_some();
+        let shown = island.set_news(news.as_ref().map(|(status, about, color)| (status.as_str(), about.as_str(), *color)));
+        let shown = shown.and_then(|batch| {
+            if grows {
+                self.set_region(self.pill_size());
+                unsafe { SetTimer(Some(self.hwnd), BUBBLE_TIMER, self.settings.claude_news_seconds * 1000, None) };
+                Ok(())
+            } else {
+                self.generation += 1;
+                self.shrink_region_after(&batch)
             }
+        });
+        if let Err(e) = shown {
+            log(format!("bubble news failed: {e}"));
         }
     }
 
-    /// The closed island's line: what Claude is doing (or waiting for) and the 5-hour limit.
-    /// `pulse` beats the mark for news that needs the user.
-    fn show_claude_state(&mut self, pulse: bool) {
-        let (status, detail, mark) = claude::summary(&self.sessions, |s| !self.seen.contains(&s.id));
-        // ponytail: a limit that resets while nothing happens shows 100 only at the next event
-        let line = (status, detail, claude::five_hour_used(&self.limits, claude::now_ms() / 1000), mark);
-        let Some(island) = self.island.as_mut() else { return };
-        if self.compact_line.as_ref() != Some(&line) {
-            if let Err(e) = island.draw_compact(&line.0, &line.1, line.2, line.3).and_then(|_| island.set_bubble(line.2)) {
-                log(format!("compact line failed: {e}"));
-            }
-            self.compact_line = Some(line);
-        }
-        if pulse {
-            if let Err(e) = island.pulse_mark() {
-                log(format!("pulse failed: {e}"));
-            }
-        }
-    }
-
-    /// The Claude tab is on screen: draw it fresh, count what it shows as noticed, and keep
-    /// the reset countdowns current to the minute.
+    /// The Claude tab is on screen: draw it fresh, take back the bubble's news (seen now), and
+    /// keep the reset countdowns current to the minute.
     fn viewing_claude(&mut self) {
         usage::refresh();
-        let attention = self.sessions.iter().filter(|s| matches!(s.state, State::Permission | State::Done));
-        self.seen.extend(attention.map(|s| s.id.clone()));
-        self.show_claude_state(false);
+        self.show_limit();
+        if self.island.as_ref().is_some_and(Island::has_news) {
+            self.show_news(None);
+        }
         if let Some(Err(e)) = self.island.as_ref().map(|i| i.draw_claude(&self.sessions, &self.limits, claude::now_ms() / 1000)) {
             log(format!("claude page failed: {e}"));
         }
@@ -959,12 +907,19 @@ impl App {
         let Some(island) = self.island.as_mut() else { return Ok(()) };
         let batch = island.animate(self.view)?;
         if !grows {
-            let (hwnd, generation) = (self.hwnd.0 as isize, self.generation);
-            batch.Completed(&TypedEventHandler::new(move |_, _| {
-                unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_ANIM_DONE, WPARAM(generation), LPARAM(0))? };
-                Ok(())
-            }))?;
+            self.shrink_region_after(&batch)?;
         }
+        Ok(())
+    }
+
+    /// Once `batch` has settled, the clickable area shrinks to what is on screen
+    /// (WM_ANIM_DONE), unless a newer transition has started since.
+    fn shrink_region_after(&self, batch: &CompositionScopedBatch) -> Result<()> {
+        let (hwnd, generation) = (self.hwnd.0 as isize, self.generation);
+        batch.Completed(&TypedEventHandler::new(move |_, _| {
+            unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_ANIM_DONE, WPARAM(generation), LPARAM(0))? };
+            Ok(())
+        }))?;
         Ok(())
     }
 
@@ -1042,7 +997,7 @@ impl App {
 
         let song = self.now_playing.as_ref().filter(|m| new_track && m.playing && !m.title.is_empty());
         if let Some(text) = song.map(|m| if m.artist.is_empty() { m.title.clone() } else { format!("{} — {}", m.title, m.artist) }) {
-            if !self.claude_needs_user() && self.settings.song_peek {
+            if self.settings.song_peek {
                 self.peek(Tab::Music, PEEK_MS, |island| island.draw_peek(&text, None));
             }
         }
@@ -1184,6 +1139,7 @@ impl App {
             WM_TIMER if wparam.0 == SHOT_TIMER => self.add_screenshots(),
             WM_TIMER if wparam.0 == LEAVE_TIMER => self.set_view(View::Compact)?,
             WM_TIMER if wparam.0 == PEEK_TIMER && self.view == View::Peek => self.set_view(View::Compact)?,
+            WM_TIMER if wparam.0 == BUBBLE_TIMER => self.show_news(None),
             WM_TIMER if wparam.0 == MINUTE_TIMER && self.view == View::Expanded => self.reload_claude(true),
             WM_TIMER if wparam.0 == SECOND_TIMER => {
                 if let Some(island) = &self.island {
@@ -1222,7 +1178,6 @@ impl App {
                 self.refresh();
                 self.media_command(Command::Refresh);
                 self.follow_audio();
-                self.reload_privacy();
                 self.reload_claude(false);
                 usage::refresh();
                 return Ok(Some(LRESULT(1)));

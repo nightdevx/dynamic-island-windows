@@ -37,6 +37,16 @@ impl State {
         }
     }
 
+    /// As the bubble's heading: "İzin bekliyor".
+    pub fn headline(self) -> &'static str {
+        match self {
+            State::Open => "Claude",
+            State::Working => tr("Çalışıyor", "Working"),
+            State::Permission => tr("İzin bekliyor", "Needs permission"),
+            State::Done => tr("Yanıt hazır", "Answer ready"),
+        }
+    }
+
     pub fn color(self) -> u32 {
         match self {
             State::Open => 0xFF8E8E93,
@@ -402,33 +412,6 @@ fn add_island(root: &mut json::Value, exe: &str) -> std::result::Result<(), Stri
 
 // ---- Island side ----
 
-/// The closed island's Claude line: a status, what it is about, and the color of the mark.
-/// The session that needs the user most, or the ones working, or what is open. `unseen`
-/// tells which waiting sessions the user has not looked at yet.
-pub fn summary(sessions: &[Session], unseen: impl Fn(&Session) -> bool) -> (String, String, u32) {
-    let name = |s: &Session| if s.project.is_empty() { "Claude".to_string() } else { s.project.clone() };
-    // "web", or "web +2" when two more sessions are open.
-    let about = |s: &Session| match sessions.len() {
-        0 | 1 => name(s),
-        n => format!("{} +{}", name(s), n - 1),
-    };
-    let line = |title: &str, detail: String, state: State| (title.to_string(), detail, state.color());
-    if let Some(s) = sessions.iter().find(|s| s.state == State::Permission) {
-        return line(tr("İzin bekliyor", "Needs permission"), about(s), State::Permission);
-    }
-    if let Some(s) = sessions.iter().find(|s| s.state == State::Done && unseen(s)) {
-        return line(tr("Yanıt hazır", "Answer ready"), about(s), State::Done);
-    }
-    let working: Vec<&Session> = sessions.iter().filter(|s| s.state == State::Working).collect();
-    match (working.len(), sessions.len()) {
-        (1, _) => line(tr("Çalışıyor", "Working"), about(working[0]), State::Working),
-        (n, _) if n > 1 => line(tr("Çalışıyor", "Working"), tr(format!("{n} oturum"), format!("{n} sessions")), State::Working),
-        (_, 0) => line("Claude", tr("Açık oturum yok", "No open sessions").into(), State::Open),
-        (_, 1) => line("Claude", name(&sessions[0]), State::Open),
-        (_, n) => line("Claude", tr(format!("{n} oturum açık"), format!("{n} sessions open")), State::Open),
-    }
-}
-
 /// Percent used of the 5-hour limit (0 once it has reset), and its color.
 pub fn five_hour_used(limits: &Limits, now: u64) -> Option<(f32, u32)> {
     let w = limits.five_hour?;
@@ -542,25 +525,10 @@ mod tests {
     }
 
     #[test]
-    fn summary_puts_the_user_first() {
-        let session = |id: &str, project: &str, state| Session { id: id.into(), project: project.into(), state, updated_ms: 0, pid: 0 };
-        let all = |_: &Session| true;
-        let text = |line: (String, String, u32)| format!("{} / {}", line.0, line.1);
-        assert_eq!(text(summary(&[], all)), "Claude / Açık oturum yok");
-        assert_eq!(text(summary(&[session("a", "web", State::Open)], all)), "Claude / web");
-        let open = [session("a", "web", State::Open), session("b", "api", State::Open)];
-        assert_eq!(text(summary(&open, all)), "Claude / 2 oturum açık");
-        let busy = [session("a", "web", State::Working), session("b", "api", State::Working)];
-        assert_eq!(text(summary(&busy, all)), "Çalışıyor / 2 oturum");
-        let mixed = [session("a", "web", State::Working), session("b", "api", State::Permission), session("c", "app", State::Done)];
-        assert_eq!(summary(&mixed, all), ("İzin bekliyor".to_string(), "api +2".to_string(), State::Permission.color()));
-        let done = [session("a", "web", State::Working), session("c", "app", State::Done)];
-        assert_eq!(text(summary(&done, all)), "Yanıt hazır / app +1");
-        // An answer the user already saw no longer takes the line.
-        assert_eq!(text(summary(&done, |_| false)), "Çalışıyor / web +1");
+    fn headlines_and_limits() {
+        assert_eq!(State::Permission.headline(), "İzin bekliyor");
         crate::text::set(crate::text::Language::English);
-        assert_eq!(text(summary(&open, all)), "Claude / 2 sessions open");
-        assert_eq!(text(summary(&done, all)), "Answer ready / app +1");
+        assert_eq!(State::Done.headline(), "Answer ready");
 
         let limits = Limits { five_hour: Some(Window { used_percentage: 92.6, resets_at: 100 }), ..Limits::default() };
         let used = five_hour_used(&limits, 50).unwrap();

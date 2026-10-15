@@ -15,16 +15,16 @@ pub struct Settings {
     pub equalizer: bool,
     /// New screenshots go to the shelf, with a peek.
     pub screenshots: bool,
-    /// The microphone/camera dot, and a peek when one starts.
-    pub privacy_dot: bool,
     /// A soft glow in the art's color around the pill while music plays.
     pub glow: bool,
     /// A peek with the new song when one starts.
     pub song_peek: bool,
     /// A peek with the level when the system volume changes.
     pub volume_peek: bool,
-    /// A peek when a Claude session starts waiting on the user.
+    /// The bubble grows when a Claude session starts waiting on the user.
     pub claude_peek: bool,
+    /// How long it stays grown, seconds.
+    pub claude_news_seconds: u32,
     /// A preview of each new Windows notification.
     pub notifications: bool,
     /// The island's own: it opens by itself for nothing (Windows' setting is not consulted).
@@ -41,11 +41,11 @@ impl Default for Settings {
             show_exe: Vec::new(),
             equalizer: true,
             screenshots: true,
-            privacy_dot: true,
             glow: true,
             song_peek: true,
             volume_peek: true,
             claude_peek: true,
+            claude_news_seconds: 10,
             notifications: true,
             do_not_disturb: false,
             language: Language::Auto,
@@ -86,12 +86,17 @@ pub fn file_text(s: &Settings) -> String {
         ("Müzik çalarken island'ın kenarında kapak renginde hafif bir parıltı.", "A soft glow in the cover's color around the island while music plays.", "glow", s.glow.to_string()),
         ("Yeni şarkı başlayınca island kısa süre açılıp şarkıyı göstersin mi?", "Show the new song for a moment when one starts?", "song_peek", s.song_peek.to_string()),
         ("Sistem sesi değişince island seviyeyi göstersin mi?", "Show the level when the system volume changes?", "volume_peek", s.volume_peek.to_string()),
-        ("Mikrofon ya da kamera kullanılırken island'da renkli nokta yansın mı?", "Light a colored dot while the microphone or camera is in use?", "privacy_dot", s.privacy_dot.to_string()),
         (
-            "Bir Claude oturumu izin isteyince ya da cevabı bitince island kısa süre açılsın mı?",
-            "Open the island for a moment when a Claude session asks for permission or finishes an answer?",
+            "Bir Claude oturumu izin isteyince ya da cevabı bitince island'ın yanındaki baloncuk büyüyüp bunu göstersin mi?",
+            "Grow the bubble beside the island when a Claude session asks for permission or finishes an answer?",
             "claude_peek",
             s.claude_peek.to_string(),
+        ),
+        (
+            "Baloncuğun büyük kalacağı süre (saniye, 1-120).",
+            "How long the bubble stays grown (seconds, 1-120).",
+            "claude_news_seconds",
+            s.claude_news_seconds.to_string(),
         ),
         (
             "Bilgisayara gelen bildirimler island'da kısa bir önizlemeyle görünsün mü?",
@@ -184,7 +189,7 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
             "expand_on_hover" => value.parse().map(|v| settings.expand_on_hover = v).is_ok(),
             "equalizer" => value.parse().map(|v| settings.equalizer = v).is_ok(),
             "screenshots" => value.parse().map(|v| settings.screenshots = v).is_ok(),
-            "privacy_dot" => value.parse().map(|v| settings.privacy_dot = v).is_ok(),
+            "privacy_dot" => true, // retired with the microphone/camera dot
             "glow" => value.parse().map(|v| settings.glow = v).is_ok(),
             "song_peek" => value.parse().map(|v| settings.song_peek = v).is_ok(),
             "volume_peek" => value.parse().map(|v| settings.volume_peek = v).is_ok(),
@@ -193,6 +198,7 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
             "do_not_disturb" => value.parse().map(|v| settings.do_not_disturb = v).is_ok(),
             "language" => Language::from_code(value).map(|v| settings.language = v).is_some(),
             "hover_delay_ms" => value.parse().ok().filter(|v| *v <= 5000).map(|v| settings.hover_delay_ms = v).is_some(),
+            "claude_news_seconds" => value.parse().ok().filter(|v| (1..=120).contains(v)).map(|v| settings.claude_news_seconds = v).is_some(),
             "hide_exe" => {
                 settings.hide_exe = exe_list(value);
                 true
@@ -227,11 +233,11 @@ mod tests {
             show_exe: vec!["mpv.exe".into()],
             equalizer: false,
             screenshots: false,
-            privacy_dot: false,
             glow: false,
             song_peek: false,
             volume_peek: false,
             claude_peek: false,
+            claude_news_seconds: 30,
             notifications: false,
             do_not_disturb: true,
             language: Language::English,

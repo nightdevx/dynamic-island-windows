@@ -203,13 +203,14 @@ pub fn shelf_page(c: &Canvas, shelf: &Shelf, list: usize, counts: [usize; 2], dr
     c.text(if selected > 0 { tr("Kaldır", "Remove") } else { tr("Temizle", "Clear") }, SHELF_CLEAR, 11.5, true, DIM, Align::Right)
 }
 
-/// The closed island's two lines: a bold title and a dim line under it, `w` wide.
-pub fn two_lines(c: &Canvas, title: &str, detail: &str, w: f32, h: f32) -> Result<()> {
+/// Two lines in a closed pill or the bubble: a bold title in `color` and a dim line under it,
+/// `w` wide.
+pub fn two_lines(c: &Canvas, title: &str, detail: &str, color: u32, w: f32, h: f32) -> Result<()> {
     if detail.is_empty() {
-        return c.text(title, (0.0, 0.0, w, h), 13.0, true, TEXT, Align::Left);
+        return c.text(title, (0.0, 0.0, w, h), 13.0, true, color, Align::Left);
     }
     let top = h / 2.0 - 15.5;
-    c.text(title, (0.0, top, w, 17.5), 12.5, true, TEXT, Align::Left)?;
+    c.text(title, (0.0, top, w, 17.5), 12.5, true, color, Align::Left)?;
     c.text(detail, (0.0, top + 17.0, w, 14.0), 10.5, false, DIM, Align::Left)
 }
 
