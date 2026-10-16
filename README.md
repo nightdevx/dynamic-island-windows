@@ -30,14 +30,17 @@
 
 ## Features
 
-- **Now playing:** any player that shows up in Windows' media controls (Spotify, browsers, Media Player, Apple Music…). Title, artist, cover art and progress. Previous, play/pause, next, shuffle and repeat buttons when the player supports them. Click the progress bar to seek. Click the cover or the title to bring the player to the front, right down to its browser tab. With several players open, switch between them from the open island or with the mouse wheel. While music plays, the closed island takes on the cover's colors, with a small equalizer and a soft glow.
+- **Now playing:** any player that shows up in Windows' media controls (Spotify, browsers, Media Player, Apple Music…). Title, artist, cover art and progress. Previous, play/pause, next, shuffle and repeat buttons when the player supports them. Click the progress bar to seek. Click the cover or the title to bring the player to the front, right down to its browser tab. With several players open, switch between them from the open island or with the mouse wheel. A paused song stays on the closed island. While music plays, the closed island takes on the cover's colors, with a soft glow and a small equalizer that moves with how loud the music plays. A title too long for the closed island scrolls by once.
 - **Liked songs:** tap the heart on the music page to keep the song in your list. Find them under Settings → Liked, where a click looks a song up on YouTube Music.
-- **Claude Code:** open sessions and what they are doing (working, waiting for permission, answer ready), plus how much of your 5-hour and weekly plan limits you have used. Click a session to bring its window to the front. The 5-hour limit sits in a small bubble beside the island; when a session needs you or finishes, the bubble grows to say so for a few seconds (10 by default, adjustable).
+- **Claude Code:** open sessions and what they are doing (working, waiting for permission, answer ready), plus how much of your 5-hour and weekly plan limits you have used. Click a session to bring its window to the front. The 5-hour limit sits in the closed island's right end and moves out into a small bubble of its own when music starts; when a session needs you or finishes, the bubble grows to say so for a few seconds (10 by default, adjustable).
 - **Notifications:** new Windows notifications show up on the island as a short preview with the app's logo. The island has its own Do not disturb, separate from Windows'.
 - **File shelf:** drag files onto the island (or right-click them → Send to → Dynamic Island) and they wait on its shelf; later drag them from there to any folder, mail or chat. Your files stay where they are: the shelf only remembers them, and a drop copies.
 - **Screenshots on the shelf:** every screenshot you take while the island runs (Win + PrtScn, the Snipping Tool) lands in the shelf's second list with a short peek, labelled by the time it was taken. Like the file shelf it is for now: older screenshots are not listed, and one you clear does not come back.
 - **Pick several:** on both lists, click to select, then drag the whole selection out at once. Double-click opens a file; the wheel scrolls a long list.
 - **Volume:** a short peek with the level whenever the system volume changes.
+- **Clock:** with no song on, the closed island shows the time and the day.
+- **Timer:** the Timer tab counts down the minutes you pick (1 to 45, or any with the mouse wheel). While it runs, the closed island shows the time left; at the end an alarm sounds and the island says so.
+- **Bluetooth headphones:** when the sound moves to a Bluetooth headset, a card shows its name and, when Windows knows it, its battery.
 - **Out of the way:** hides by itself in fullscreen apps and games, and stays above other windows otherwise.
 - **Settings window:** every option in one place, light or dark with Windows, in Turkish or English.
 
@@ -65,7 +68,7 @@ Requires Windows 10 (1809) or Windows 11, 64-bit. The interface is in Turkish or
 
 ## Use
 
-- Hover over the island, or click it, to open it. The tabs at the top switch between Music, Claude and Shelf; the gear on the right opens the settings.
+- Hover over the island, or click it, to open it. The tabs at the top switch between Music, Claude, Shelf and Timer; the gear on the right opens the settings.
 - Scroll over the island to switch to another player.
 - Drag files onto the island to put them on the shelf. On the shelf (Files, Screenshots), click items to select them, drag one to drop the selection anywhere (it then leaves the shelf), double-click to open. "Select all" selects all; "Remove" / "Clear" takes items off the list without deleting them.
 - Right-click the island or its tray icon for: start with Windows, settings, liked songs, Do not disturb, quit.
@@ -85,6 +88,7 @@ Open the settings window from the gear in the open island, the right-click menu,
 | `glow` | `true` | A soft glow in the cover's color while music plays |
 | `song_peek` | `true` | Show a new song for a moment when it starts |
 | `volume_peek` | `true` | Show the level when the system volume changes |
+| `bluetooth_peek` | `true` | A card with a Bluetooth headset's name and battery when it connects |
 | `claude_peek` | `true` | The bubble grows when a Claude session needs you or finishes |
 | `claude_news_seconds` | `10` | How long the bubble stays grown (seconds) |
 | `notifications` | `true` | Show new notifications in a short preview |
@@ -145,6 +149,7 @@ How it is put together:
 | `src/island.rs`, `src/blur.rs` | The composition tree: springs, blurs, every visual |
 | `src/pages.rs`, `src/render.rs` | What gets drawn (Direct2D/DirectWrite) |
 | `src/media.rs`, `src/player.rs` | Windows media sessions on their own thread; bringing a player to the front |
+| `src/timer.rs`, `src/bluetooth.rs` | The timer; which Bluetooth headset plays |
 | `src/liked.rs` | Liked songs |
 | `src/notices.rs` | Windows notifications |
 | `src/preferences.rs`, `src/settings.rs`, `src/text.rs` | The settings window, the settings file, Turkish and English texts |

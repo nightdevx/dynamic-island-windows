@@ -61,6 +61,7 @@ impl IMMNotificationClient_Impl for OnDevice_Impl {
 pub struct Volume {
     devices: IMMDeviceEnumerator,
     endpoint: Option<IAudioEndpointVolume>,
+    meter: Option<IAudioMeterInformation>, // how loud the device plays, for the equalizer
     on_volume: IAudioEndpointVolumeCallback,
     on_device: IMMNotificationClient,
 }
@@ -74,7 +75,12 @@ impl Volume {
         let on_device: IMMNotificationClient = OnDevice { window, message: device_message }.into();
         unsafe { devices.RegisterEndpointNotificationCallback(&on_device)? };
         let on_volume = OnVolume { window, message: volume_message }.into();
-        Ok(Self { devices, endpoint: None, on_volume, on_device })
+        Ok(Self { devices, endpoint: None, meter: None, on_volume, on_device })
+    }
+
+    /// The default output's peak level right now, 0..1; None without a device.
+    pub fn peak(&self) -> Option<f32> {
+        unsafe { self.meter.as_ref()?.GetPeakValue().ok() }
     }
 
     /// Listens to the current default output device and returns its volume and mute.
@@ -87,6 +93,7 @@ impl Volume {
         unsafe {
             let device = self.devices.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
             let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
+            self.meter = device.Activate(CLSCTX_ALL, None).ok();
             endpoint.RegisterControlChangeNotify(&self.on_volume)?;
             let level = (endpoint.GetMasterVolumeLevelScalar()? * 100.0).round() as u32;
             let muted = endpoint.GetMute()?.as_bool();

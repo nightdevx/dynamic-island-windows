@@ -19,10 +19,12 @@ use crate::{
     blur,
     claude::{Limits, Session},
     media::{Art, Media},
+    notices::Notice,
     shelf,
     pages::{self, ART, ART_SOURCE, BAR, BUTTON, BUTTONS_Y, BUTTON_X, HEART, PAGE, TEXT, TIMES},
-    render::{Align, Painter},
+    render::{Align, Canvas, Painter},
     text::tr,
+    timer::{Timer, PRESETS},
 };
 
 // Sizes in DIPs; multiplied by the monitor scale at runtime.
@@ -50,8 +52,12 @@ const SHADOW: [f32; 3] = [14.0, 8.0, 3.5];
 const SHADOW_ALPHA: u32 = 0x12;
 
 // Compact: while a song is on (playing or paused), the art, two lines of text and the equalizer on the right (the
-// text's surface spans from TEXT_X to the pill's end); otherwise an empty pill, IDLE wide.
-const IDLE: f32 = 200.0;
+// text's surface spans from TEXT_X to the pill's end); otherwise a pill IDLE wide with a clock,
+// and the bubble's ring docked in its right end.
+const IDLE: f32 = 220.0;
+/// The clock: the time over the day, left in the empty pill.
+const CLOCK_X: f32 = 22.0;
+const CLOCK: (f32, f32) = (IDLE - CLOCK_X - BUBBLE - 6.0, COMPACT.1);
 const TEXT_X: f32 = 46.0;
 const LINES: (f32, f32) = (COMPACT.0 - TEXT_X, COMPACT.1);
 const SMALL_ART: f32 = 30.0;
@@ -67,15 +73,21 @@ const BARS_W: f32 = BARS as f32 * (BAR_W + 3.0) - 3.0;
 
 /// Where the line's own item ends, from the pill's left.
 const ITEMS_END: f32 = COMPACT.0 - EDGE;
-
+/// A running timer's time, in the equalizer's place; the title keeps clear of it.
+const TIMER_W: f32 = 40.0;
+// A title too long for its place scrolls by at this speed (DIPs a second), this long after it
+// shows, with this gap before it comes round again.
+const MARQUEE_SPEED: f32 = 30.0;
+const MARQUEE_DELAY_MS: i64 = 1500;
+const MARQUEE_GAP: f32 = 36.0;
 
 // Expanded: tab bar on top, the selected page below it.
-const TAB_W: f32 = 82.0;
+const TAB_W: f32 = 64.0;
 const TAB_H: f32 = 24.0;
 const TAB_Y: f32 = 10.0;
 const PAGE_Y: f32 = 40.0;
 /// The settings button, right of the tabs.
-const GEAR: (f32, f32, f32, f32) = (EXPANDED.0 - 64.0, TAB_Y, 30.0, TAB_H);
+const GEAR: (f32, f32, f32, f32) = (EXPANDED.0 - 52.0, TAB_Y, 30.0, TAB_H);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum View {
@@ -99,7 +111,10 @@ pub enum Tab {
     Music,
     Claude,
     Shelf,
+    Timer,
 }
+
+const TABS: [Tab; 4] = [Tab::Music, Tab::Claude, Tab::Shelf, Tab::Timer];
 
 impl Tab {
     fn index(self) -> usize {
@@ -110,7 +125,7 @@ impl Tab {
 /// What the closed island shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Line {
-    Idle, // no song, playing or paused: an empty pill
+    Idle, // no song, playing or paused: the clock
     Music,
 }
 
@@ -133,6 +148,9 @@ pub enum Hit {
     Settings,
     ShowPlayer, // art, title or artist: bring the player to the front
     NextPlayer, // the player line, with more than one player
+    TimerMinutes(u32),
+    TimerToggle, // start, pause, go on
+    TimerReset,
 }
 
 // Claude lives in a bubble beside the closed pill, as a second activity does on the iPhone: a
@@ -185,10 +203,24 @@ pub struct Island {
     blurs: [CompositionEffectBrush; 3],
     transitions: Arc<AtomicUsize>,
     compact: LayerVisual,
+    idle_line: ContainerVisual,
+    clock_surface: CompositionDrawingSurface,
+    clock: (String, String, u32), // what it shows: the time and the day, or a timer; color
     music_line: ContainerVisual,
     title_surface: CompositionDrawingSurface,
     title_text: SpriteVisual,
+    title_clip: ContainerVisual,  // the title's place, as wide as the line gives it
+    title_still: ContainerVisual, // the title as drawn, cut with "…"
+    marquee: ContainerVisual,     // the whole title twice in a row, while it scrolls by
+    marquee_copies: [SpriteVisual; 2],
+    scrolled: (String, String), // the title and artist that scrolled last
+    marquee_shift: Option<f32>,     // how far the title scrolls, when it is too long
+    marquee_due: bool,              // it has yet to scroll by where it can be seen
+    marquee_until: Option<Instant>, // when the scroll under way ends
     bars: Vec<SpriteVisual>,
+    timer_text: SpriteVisual, // a running timer, in the equalizer's place
+    timer_surface: CompositionDrawingSurface,
+    timer_shown: Option<String>,
     accent: CompositionColorBrush, // equalizer and progress, from the art
     glow: ShapeVisual,
     glow_brushes: [CompositionColorBrush; 2], // the two strokes, same faint color
@@ -210,11 +242,11 @@ pub struct Island {
     ripple: ShapeVisual, // a soft ring spreading from the icon to the pill's round end
     expanded: LayerVisual,
     highlight: ShapeVisual,
-    pages: [ContainerVisual; 3],
-    page_surfaces: [CompositionDrawingSurface; 3],
-    page_texts: [SpriteVisual; 3],
+    pages: [ContainerVisual; 4],
+    page_surfaces: [CompositionDrawingSurface; 4],
+    page_texts: [SpriteVisual; 4],
     /// Per page, what rises into place when the island opens, group by group.
-    staggered: [Vec<Vec<Visual>>; 3],
+    staggered: [Vec<Vec<Visual>>; 4],
     times_surface: CompositionDrawingSurface,
     progress_track: ContainerVisual,
     progress: SpriteVisual,
@@ -233,11 +265,14 @@ pub struct Island {
     news_text: SpriteVisual,
     news_surface: CompositionDrawingSurface,
     news: bool, // the bubble is grown
+    bubble_shown: bool,
     shelf_view: (usize, usize, usize), // the shelf page's first item, items on screen, all items
     peek_h: f32, // a peek's height: one line, or a notification
     tab: Tab,
     line: Line,
     still: Option<bool>, // the bars rest (Some: low and even when paused) or move (None)
+    loud: f32,           // how loud the output plays, 0..1, as the equalizer shows it
+    level_step: usize,   // the equalizer's steps so far, for each bar's wave
     glowing: bool,
 }
 
@@ -345,10 +380,12 @@ impl Island {
         glow.SetOpacity(0.0)?;
         root.Children()?.InsertAtTop(&glow)?;
 
-        // The Claude bubble. "S" in the pill's property set says where it is: 0 inside the
-        // pill's right end (hidden), 1 beside it; position, size and opacity follow S and the
-        // pill's size. "E" is its width: a circle, or grown into a capsule to tell news.
+        // The Claude bubble. "S" in the pill's property set says where it is: 0 docked in the
+        // pill's right end (its black disc gone, the ring sitting in the pill), 1 beside it; "V"
+        // fades it in and out; "E" is its width: a circle, or grown into a capsule to tell news.
+        // Position and size follow these and the pill's size.
         size.InsertScalar(h!("S"), 0.0)?;
+        size.InsertScalar(h!("V"), 0.0)?;
         let bubble_px = px((BUBBLE, BUBBLE));
         size.InsertScalar(h!("E"), bubble_px.X)?;
         let grown_px = px((BUBBLE_NEWS, BUBBLE));
@@ -374,6 +411,9 @@ impl Island {
         disc_fill.SetFillBrush(&compositor.CreateColorBrushWithColor(argb(0xFF000000))?)?;
         disc_visual.Shapes()?.Append(&disc_fill)?;
         bubble.Children()?.InsertAtTop(&disc_visual)?;
+        let solid = compositor.CreateExpressionAnimationWithExpression(h!("Clamp(P.S, 0, 1)"))?;
+        solid.SetReferenceParameter(h!("P"), &size)?;
+        disc_visual.StartAnimation(h!("Opacity"), &solid)?;
         // What it shows, cut to the capsule as it grows: the limit ring, or Claude's mark with
         // the news beside it.
         let inside = compositor.CreateContainerVisual()?;
@@ -394,8 +434,9 @@ impl Island {
         inside.Children()?.InsertAtTop(&news_text)?;
         for (property, expression) in [
             ("Offset", "Vector3((Window + P.W) * 0.5 + Gap - (1 - P.S) * (Gap + B), Top + (P.H - B) * 0.5, 0)"),
-            ("Scale", "Vector3(0.5 + 0.5 * P.S, 0.5 + 0.5 * P.S, 1)"),
-            ("Opacity", "Clamp(P.S, 0, 1)"),
+            // A little smaller on the way out or in, as a drop comes away.
+            ("Scale", "Vector3(1 - 0.12 * Sin(Clamp(P.S, 0, 1) * 3.1416), 1 - 0.12 * Sin(Clamp(P.S, 0, 1) * 3.1416), 1)"),
+            ("Opacity", "Clamp(P.V, 0, 1)"),
         ] {
             let animation = compositor.CreateExpressionAnimationWithExpression(&HSTRING::from(expression))?;
             animation.SetReferenceParameter(h!("P"), &size)?;
@@ -459,6 +500,12 @@ impl Island {
         follow.SetScalarParameter(h!("Top"), (TOP * scale).round())?;
         compact.StartAnimation(h!("Offset"), &follow)?;
 
+        // With no song: a clock on the left; the bubble docks in the right end with the ring.
+        let idle_line = container(at(0.0, 0.0), (IDLE, COMPACT.1))?;
+        let clock_surface = painter.surface(CLOCK)?;
+        idle_line.Children()?.InsertAtTop(&sprite(&surface_brush(&clock_surface)?, at(CLOCK_X, 0.0), CLOCK)?)?;
+        compact.Children()?.InsertAtTop(&idle_line)?;
+
         let music_line = container(at(0.0, 0.0), COMPACT)?;
         music_line.SetOpacity(0.0)?;
         let compact_tint = sprite(&tint_brush.cast()?, at(0.0, 0.0), COMPACT)?;
@@ -467,9 +514,22 @@ impl Island {
         let (small_art, small_layers) = art_frame(at((COMPACT.1 - SMALL_ART) / 2.0, (COMPACT.1 - SMALL_ART) / 2.0), SMALL_ART, 9.0)?;
         music_line.Children()?.InsertAtTop(&small_art)?;
         let title_surface = painter.surface(LINES)?;
-        let title_text = sprite(&surface_brush(&title_surface)?, at(TEXT_X, 0.0), LINES)?;
+        // The title's place; a title too long for it scrolls by in here once (`scroll_title`).
+        let title_clip = container(at(TEXT_X, 0.0), LINES)?;
+        title_clip.SetClip(&compositor.CreateInsetClip()?)?;
+        let title_still = container(at(0.0, 0.0), LINES)?;
+        let title_text = sprite(&surface_brush(&title_surface)?, at(0.0, 0.0), LINES)?;
         translatable(&title_text.cast()?)?;
-        music_line.Children()?.InsertAtTop(&title_text)?;
+        title_still.Children()?.InsertAtTop(&title_text)?;
+        title_clip.Children()?.InsertAtTop(&title_still)?;
+        let marquee = container(at(0.0, 0.0), LINES)?;
+        marquee.SetOpacity(0.0)?;
+        let marquee_copies = [compositor.CreateSpriteVisual()?, compositor.CreateSpriteVisual()?];
+        for copy in &marquee_copies {
+            marquee.Children()?.InsertAtTop(copy)?;
+        }
+        title_clip.Children()?.InsertAtTop(&marquee)?;
+        music_line.Children()?.InsertAtTop(&title_clip)?;
         let mut bars = Vec::new();
         for i in 0..BARS {
             let x = ITEMS_END - BARS_W + i as f32 * (BAR_W + 3.0);
@@ -480,6 +540,10 @@ impl Island {
             music_line.Children()?.InsertAtTop(&bar)?;
             bars.push(bar);
         }
+        let timer_surface = painter.surface((TIMER_W, COMPACT.1))?;
+        let timer_text = sprite(&surface_brush(&timer_surface)?, at(ITEMS_END - TIMER_W, 0.0), (TIMER_W, COMPACT.1))?;
+        timer_text.SetOpacity(0.0)?;
+        music_line.Children()?.InsertAtTop(&timer_text)?;
         compact.Children()?.InsertAtTop(&music_line)?;
         content.Children()?.InsertAtTop(&compact)?;
 
@@ -539,17 +603,21 @@ impl Island {
 
         let header_surface = painter.surface((EXPANDED.0, PAGE_Y))?;
         painter.draw(&header_surface, |c| {
-            for (tab, label) in [(Tab::Music, tr("Müzik", "Music")), (Tab::Claude, "Claude"), (Tab::Shelf, tr("Raf", "Shelf"))] {
+            for (tab, label) in TABS.into_iter().zip([tr("Müzik", "Music"), "Claude", tr("Raf", "Shelf"), tr("Sayaç", "Timer")]) {
                 c.text(label, (tab_left(tab), TAB_Y, TAB_W, TAB_H), 12.5, true, TEXT, Align::Center)?;
             }
             c.icon('\u{E713}', GEAR, 13.0, pages::DIM) // Setting
         })?;
         expanded.Children()?.InsertAtTop(&sprite(&surface_brush(&header_surface)?, at(0.0, 0.0), (EXPANDED.0, PAGE_Y))?)?;
 
-        let page_surfaces = [painter.surface(PAGE)?, painter.surface(PAGE)?, painter.surface(PAGE)?];
-        let pages = [container(at(0.0, PAGE_Y), PAGE)?, container(at(0.0, PAGE_Y), PAGE)?, container(at(0.0, PAGE_Y), PAGE)?];
-        pages[1].SetOpacity(0.0)?;
-        pages[2].SetOpacity(0.0)?;
+        fn fail<T>(_: T) -> Error {
+            Error::from(windows::Win32::Foundation::E_FAIL)
+        }
+        let page_surfaces: [CompositionDrawingSurface; 4] = TABS.iter().map(|_| painter.surface(PAGE)).collect::<Result<Vec<_>>>()?.try_into().map_err(fail)?;
+        let pages: [ContainerVisual; 4] = TABS.iter().map(|_| container(at(0.0, PAGE_Y), PAGE)).collect::<Result<Vec<_>>>()?.try_into().map_err(fail)?;
+        for page in &pages[1..] {
+            page.SetOpacity(0.0)?;
+        }
         let mut texts = Vec::new();
         for (page, surface) in pages.iter().zip(&page_surfaces) {
             let text = sprite(&surface_brush(surface)?, at(0.0, 0.0), PAGE)?;
@@ -557,7 +625,7 @@ impl Island {
             expanded.Children()?.InsertAtTop(page)?;
             texts.push(text);
         }
-        let page_texts: [SpriteVisual; 3] = texts.try_into().map_err(|_| Error::from(windows::Win32::Foundation::E_FAIL))?;
+        let page_texts: [SpriteVisual; 4] = texts.try_into().map_err(fail)?;
         let music = &pages[Tab::Music.index()];
         let (page_art, page_layers) = art_frame(at(ART.0, ART.1), ART.2, pages::ART_RADIUS)?;
         // A hairline around the art keeps a dark cover from melting into the black pill.
@@ -605,9 +673,9 @@ impl Island {
         content.Children()?.InsertAtTop(&expanded)?;
 
         // What rises into place as the island opens: on the music page the art and title
-        // first, then the progress, the buttons, the volume.
+        // first, then the progress, the buttons.
         let visual = |v: &SpriteVisual| -> Result<Visual> { v.cast() };
-        let staggered: [Vec<Vec<Visual>>; 3] = [
+        let staggered: [Vec<Vec<Visual>>; 4] = [
             vec![
                 vec![page_art.cast()?, visual(&page_texts[0])?, visual(&heart)?],
                 vec![progress_track.cast()?, visual(&times)?],
@@ -615,6 +683,7 @@ impl Island {
             ],
             vec![vec![visual(&page_texts[1])?]],
             vec![vec![visual(&page_texts[2])?]],
+            vec![vec![visual(&page_texts[3])?]],
         ];
         for item in staggered.iter().flatten().flatten() {
             translatable(item)?;
@@ -647,10 +716,24 @@ impl Island {
             blurs,
             transitions: Arc::new(AtomicUsize::new(0)),
             compact,
+            idle_line,
+            clock_surface,
+            clock: Default::default(),
             music_line,
             title_surface,
             title_text,
+            title_clip,
+            title_still,
+            marquee,
+            marquee_copies,
+            scrolled: Default::default(),
+            marquee_shift: None,
+            marquee_due: false,
+            marquee_until: None,
             bars,
+            timer_text,
+            timer_surface,
+            timer_shown: None,
             accent,
             glow,
             glow_brushes,
@@ -693,11 +776,14 @@ impl Island {
             news_text,
             news_surface,
             news: false,
+            bubble_shown: false,
             shelf_view: (0, 0, 0),
             peek_h: PEEK.1,
             tab: Tab::Music,
             line: Line::Idle,
             still: Some(false),
+            loud: 0.0,
+            level_step: 0,
             glowing: false,
         };
         island.set_media(None, 0)?;
@@ -743,6 +829,11 @@ impl Island {
         let batch = self.compositor.CreateScopedBatch(CompositionBatchTypes::Animation)?;
         let from = std::mem::replace(&mut self.view, view);
         self.place_bubble()?;
+        if view == View::Compact {
+            self.start_marquee()?;
+        } else {
+            self.stop_marquee()?;
+        }
         let full = self.full_motion;
         // A spring started mid-flight continues from the value currently on screen; we hand it
         // the velocity it had there.
@@ -929,7 +1020,7 @@ impl Island {
             if (GEAR.0..GEAR.0 + GEAR.2).contains(&x) {
                 return Some(Hit::Settings);
             }
-            let tab = [Tab::Music, Tab::Claude, Tab::Shelf].into_iter().find(|&tab| (tab_left(tab)..tab_left(tab) + TAB_W).contains(&x));
+            let tab = TABS.into_iter().find(|&tab| (tab_left(tab)..tab_left(tab) + TAB_W).contains(&x));
             return tab.map(Hit::Tab);
         }
         let y = y - PAGE_Y;
@@ -951,6 +1042,15 @@ impl Island {
                     return Some(Hit::ClearShelf);
                 }
                 return (0..shown).find(|&slot| inside(pages::shelf_tile(slot, shown))).map(|slot| Hit::ShelfItem(offset + slot));
+            }
+            Tab::Timer => {
+                if let Some(i) = (0..PRESETS.len()).find(|&i| inside(pages::timer_chip(i))) {
+                    return Some(Hit::TimerMinutes(PRESETS[i]));
+                }
+                if inside(pages::TIMER_TOGGLE) {
+                    return Some(Hit::TimerToggle);
+                }
+                return inside(pages::TIMER_RESET).then_some(Hit::TimerReset);
             }
             Tab::Music => {}
         }
@@ -1005,8 +1105,9 @@ impl Island {
             Some(m) => (m.title.as_str(), m.artist.as_str()),
             None => ("", ""),
         };
-        let w = ITEMS_END - BARS_W - GAP - TEXT_X;
+        let w = ITEMS_END - TIMER_W.max(BARS_W) - GAP - TEXT_X;
         self.painter.draw(&self.title_surface, |c| pages::two_lines(c, title, detail, TEXT, w, COMPACT.1))?;
+        self.scroll_title(title, detail, w)?;
         self.draw_times(media, now_ms)?;
         let enabled = |f: fn(&Media) -> bool| media.is_some_and(f);
         let glyphs = [
@@ -1130,6 +1231,18 @@ impl Island {
         Ok(())
     }
 
+    /// One step of the equalizer following how loud the output plays (`peak`, 0..1); the
+    /// window calls it ten times a second while the bars may move. Bars rise at once and fall
+    /// back slower, like a level meter.
+    pub fn show_level(&mut self, peak: f32) -> Result<()> {
+        self.loud = loudness(peak).max(self.loud * 0.7);
+        self.level_step += 1;
+        for (i, bar) in self.bars.iter().enumerate() {
+            bar.SetScale(Vector3 { X: 1.0, Y: bar_level(self.loud, i, self.level_step), Z: 1.0 })?;
+        }
+        Ok(())
+    }
+
     /// What the closed island shows; the window springs it to its new width. `moving` (music
     /// playing, island closed and on screen) keeps the equalizer going; see `bar_heights`.
     /// `glow` allows the music glow.
@@ -1137,6 +1250,13 @@ impl Island {
         if line != self.line {
             self.line = line;
             self.crossfade(&self.music_line.cast()?, line == Line::Music, 180)?;
+            self.crossfade(&self.idle_line.cast()?, line == Line::Idle, 180)?;
+            self.place_bubble()?; // Claude moves out when a song starts, and back in after
+            if line == Line::Music {
+                self.start_marquee()?;
+            } else {
+                self.stop_marquee()?;
+            }
         }
         let glowing = glow && line == Line::Music;
         if glowing != self.glowing {
@@ -1204,10 +1324,24 @@ impl Island {
 
     /// A notification's preview: the sender's icon on a disc in the round end, who sent it,
     /// its title and a line of it.
-    pub fn draw_notice(&mut self, notice: &crate::notices::Notice) -> Result<()> {
+    pub fn draw_notice(&mut self, notice: &Notice) -> Result<()> {
+        self.draw_card(notice, |c| pages::notice_icon(c, notice.icon.as_ref()), notice.icon.is_none())
+    }
+
+    /// A Bluetooth headset that connected: its icon with the battery as a ring around it, its
+    /// name, the battery left.
+    pub fn draw_device(&mut self, name: &str, battery: Option<u8>) -> Result<()> {
+        let body = battery.map(|p| tr(format!("Pil %{p}"), format!("Battery {p}%"))).unwrap_or_default();
+        let card = Notice { app: tr("Bağlandı", "Connected").into(), title: name.into(), body, icon: None };
+        self.draw_card(&card, |c| pages::device_icon(c, battery), false)
+    }
+
+    /// A card as tall as a notification: `icon` painted on the disc in the round end, which
+    /// pops in with ripples, and the card's words. `ring` rings the icon like a bell.
+    fn draw_card(&mut self, notice: &Notice, icon: impl FnOnce(&Canvas) -> Result<()>, ring: bool) -> Result<()> {
         self.peek_h = NOTICE.1;
         self.art_frames[1].SetOpacity(0.0)?;
-        self.painter.draw(&self.notice_surface, |c| pages::notice_icon(c, notice.icon.as_ref()))?;
+        self.painter.draw(&self.notice_surface, icon)?;
         self.painter.draw(&self.peek_surface, |c| pages::notice(c, NOTICE, notice))?;
         if !self.full_motion {
             return self.notice_icon.SetOpacity(1.0);
@@ -1247,7 +1381,7 @@ impl Island {
         }
         self.ripple.StartAnimation(h!("Scale"), &spread)?;
         self.ripple.StartAnimation(h!("Opacity"), &fade)?;
-        if notice.icon.is_none() {
+        if ring {
             // The bell rings.
             let ring = self.compositor.CreateScalarKeyFrameAnimation()?;
             for (at, angle) in [(0.0, 0.0), (0.15, -16.0), (0.35, 13.0), (0.55, -9.0), (0.75, 5.0), (1.0, 0.0)] {
@@ -1330,26 +1464,153 @@ impl Island {
         Ok(batch)
     }
 
+    /// The empty pill's two lines: the time and the day, or a running timer, the first line
+    /// in the color given. Drawn when they change.
+    pub fn draw_clock(&mut self, clock: (String, String, u32)) -> Result<()> {
+        if clock != self.clock {
+            let (first, second, color) = &clock;
+            self.painter.draw(&self.clock_surface, |c| pages::two_lines(c, first, second, *color, CLOCK.0, CLOCK.1))?;
+            self.clock = clock;
+        }
+        Ok(())
+    }
+
+    /// A timer's time in the music line, in the equalizer's place; None gives the place back.
+    pub fn set_music_timer(&mut self, time: Option<&str>) -> Result<()> {
+        let time = time.map(str::to_string);
+        if time == self.timer_shown {
+            return Ok(());
+        }
+        if let Some(time) = &time {
+            self.painter.draw(&self.timer_surface, |c| c.text(time, (0.0, 0.0, TIMER_W, COMPACT.1), 12.5, true, pages::ORANGE, Align::Right))?;
+        }
+        if time.is_some() != self.timer_shown.is_some() {
+            self.crossfade(&self.timer_text.cast()?, time.is_some(), 200)?;
+            for bar in &self.bars {
+                self.crossfade(&bar.cast()?, time.is_none(), 200)?;
+            }
+        }
+        self.timer_shown = time;
+        Ok(())
+    }
+
+    /// A title or artist too long for the closed pill's `w` DIPs scrolls by once, a moment
+    /// after a new one shows on the closed pill, and comes round to its start: the whole text
+    /// is drawn twice in a row, so where it stops looks like where it began. Then the cut-off
+    /// title is back.
+    fn scroll_title(&mut self, title: &str, detail: &str, w: f32) -> Result<()> {
+        self.title_clip.SetSize(self.painter.px((w, COMPACT.1)))?;
+        let text = (title.to_string(), detail.to_string());
+        if text == self.scrolled {
+            return Ok(()); // the same song: its state changed, not its name
+        }
+        self.scrolled = text;
+        self.rest_marquee()?;
+        self.marquee_until = None;
+        let long = self.painter.text_width(title, 12.5, true)?.max(self.painter.text_width(detail, 10.5, false)?);
+        self.marquee_shift = (long > w && self.full_motion).then_some(long + MARQUEE_GAP);
+        self.marquee_due = self.marquee_shift.is_some();
+        if !self.marquee_due {
+            return Ok(());
+        }
+        let size = (long.ceil() + 2.0, COMPACT.1);
+        let surface = self.painter.surface(size)?;
+        self.painter.draw(&surface, |c| pages::two_lines(c, title, detail, TEXT, size.0, size.1))?;
+        let brush: CompositionBrush = self.compositor.CreateSurfaceBrushWithSurface(&surface)?.cast()?;
+        for (i, copy) in self.marquee_copies.iter().enumerate() {
+            copy.SetBrush(&brush)?;
+            copy.SetSize(self.painter.px(size))?;
+            copy.SetOffset(Vector3 { X: self.painter.px((i as f32 * (long + MARQUEE_GAP), 0.0)).X, Y: 0.0, Z: 0.0 })?;
+        }
+        self.start_marquee()
+    }
+
+    /// The due scroll, once the closed pill shows the music line.
+    fn start_marquee(&mut self) -> Result<()> {
+        let Some(shift) = self.marquee_shift.filter(|_| self.marquee_due && self.view == View::Compact && self.line == Line::Music) else {
+            return Ok(());
+        };
+        self.marquee_due = false;
+        let duration = (shift / MARQUEE_SPEED * 1000.0) as i64;
+        self.marquee_until = Some(Instant::now() + Duration::from_millis((MARQUEE_DELAY_MS + duration) as u64));
+        let slide = self.compositor.CreateScalarKeyFrameAnimation()?;
+        slide.InsertKeyFrame(0.0, 0.0)?;
+        slide.InsertKeyFrameWithEasingFunction(1.0, -self.painter.px((shift, 0.0)).X, &self.compositor.CreateLinearEasingFunction()?)?;
+        // The two swap at the start and at the end, where they look alike.
+        let swap = |from: f32, to: f32| -> Result<ScalarKeyFrameAnimation> {
+            let animation = self.compositor.CreateScalarKeyFrameAnimation()?;
+            animation.InsertKeyFrame(0.0, from)?;
+            animation.InsertKeyFrame(0.995, from)?;
+            animation.InsertKeyFrame(1.0, to)?;
+            Ok(animation)
+        };
+        let (show, hide) = (swap(1.0, 0.0)?, swap(0.0, 1.0)?);
+        for animation in [slide.cast::<KeyFrameAnimation>()?, show.cast()?, hide.cast()?] {
+            animation.SetDuration(ms(duration))?;
+            animation.SetDelayTime(ms(MARQUEE_DELAY_MS))?;
+        }
+        self.marquee.StartAnimation(h!("Offset.X"), &slide)?;
+        self.marquee.StartAnimation(h!("Opacity"), &show)?;
+        self.title_still.StartAnimation(h!("Opacity"), &hide)
+    }
+
+    /// The music line goes out of sight: a scroll under way stops, to come again later.
+    fn stop_marquee(&mut self) -> Result<()> {
+        if self.marquee_until.take().is_some_and(|until| Instant::now() < until) {
+            self.marquee_due = true;
+            self.rest_marquee()?;
+        }
+        Ok(())
+    }
+
+    /// The cut-off title shows, the scrolling one waits at its start.
+    fn rest_marquee(&self) -> Result<()> {
+        for visual in [self.marquee.cast::<Visual>()?, self.title_still.cast()?] {
+            visual.StopAnimation(h!("Opacity"))?;
+        }
+        self.marquee.StopAnimation(h!("Offset.X"))?;
+        self.marquee.SetOffset(Vector3::default())?;
+        self.marquee.SetOpacity(0.0)?;
+        self.title_still.SetOpacity(1.0)
+    }
+
+    /// The timer page, at `now` on the timer's clock.
+    pub fn draw_timer(&self, timer: &Timer, now: u64) -> Result<()> {
+        self.painter.draw(&self.page_surfaces[Tab::Timer.index()], |c| pages::timer_page(c, timer, now))
+    }
+
     pub fn has_news(&self) -> bool {
         self.news
     }
 
-    /// The bubble comes out beside the closed pill while it has a limit or news to show, and
-    /// goes back into it otherwise (as the pill opens, it takes the bubble in).
+    /// The bubble: beside the closed pill while a song is on or it tells news, docked in the
+    /// pill's right end otherwise (its ring then sits in the pill); hidden while the island is
+    /// open or peeks, or with nothing to show.
     fn place_bubble(&mut self) -> Result<()> {
-        let out = (self.bubble_limit.is_some() || self.news) && self.view == View::Compact;
-        if out == self.bubble_out {
-            return Ok(());
+        let shown = (self.bubble_limit.is_some() || self.news) && self.view == View::Compact;
+        let out = shown && (self.line == Line::Music || self.news);
+        if out != self.bubble_out {
+            self.bubble_out = out;
+            let spring = self.compositor.CreateSpringScalarAnimation()?;
+            spring.SetDampingRatio(0.74)?;
+            spring.SetPeriod(ms(66))?;
+            spring.SetFinalValue(&PropertyValue::CreateSingle(if out { 1.0 } else { 0.0 })?.cast::<IReference<f32>>()?)?;
+            if out {
+                spring.SetDelayTime(ms(90))?; // as the pill makes room
+            }
+            self.size.StartAnimation(h!("S"), &spring)?;
         }
-        self.bubble_out = out;
-        let spring = self.compositor.CreateSpringScalarAnimation()?;
-        spring.SetDampingRatio(0.72)?;
-        spring.SetPeriod(ms(62))?;
-        spring.SetFinalValue(&PropertyValue::CreateSingle(if out { 1.0 } else { 0.0 })?.cast::<IReference<f32>>()?)?;
-        if out {
-            spring.SetDelayTime(ms(160))?; // once the pill has settled
+        if shown != self.bubble_shown {
+            self.bubble_shown = shown;
+            let fade = self.compositor.CreateScalarKeyFrameAnimation()?;
+            fade.InsertKeyFrameWithEasingFunction(1.0, if shown { 1.0 } else { 0.0 }, &self.easing)?;
+            fade.SetDuration(ms(if shown { 240 } else { 120 }))?;
+            if shown {
+                fade.SetDelayTime(ms(160))?; // once the pill has settled
+            }
+            self.size.StartAnimation(h!("V"), &fade)?;
         }
-        self.size.StartAnimation(h!("S"), &spring)
+        Ok(())
     }
 
     fn bubble_width(&self) -> f32 {
@@ -1389,8 +1650,20 @@ fn bar_height(bar: usize, step: usize) -> f32 {
     0.625 + 0.2 * (speed * t + phase).sin() + 0.075 * (7.0 * t + phase * 2.0).sin()
 }
 
+/// How loud a peak level (0..1, linear) sounds, 0..1: -42 dB is silence, 0 dB the loudest.
+fn loudness(peak: f32) -> f32 {
+    ((20.0 * peak.max(1e-5).log10() + 42.0) / 42.0).clamp(0.0, 1.0)
+}
+
+/// A bar's height (of BAR_H) at `loud`ness: from the paused height up, each bar a little apart
+/// by its own wave.
+fn bar_level(loud: f32, bar: usize, step: usize) -> f32 {
+    let wave = (bar_height(bar, step) - 0.35) / 0.55; // about 0..1
+    PAUSED_BAR + (1.0 - PAUSED_BAR) * loud * (0.55 + 0.45 * wave.clamp(0.0, 1.0))
+}
+
 fn tab_left(tab: Tab) -> f32 {
-    EXPANDED.0 / 2.0 + (tab.index() as f32 - 1.5) * TAB_W
+    EXPANDED.0 / 2.0 + (tab.index() as f32 - TABS.len() as f32 / 2.0) * TAB_W
 }
 
 /// A NaturalMotion spring. Damping stays below 1: Motion models an underdamped spring.
@@ -1472,11 +1745,12 @@ mod tests {
 
     #[test]
     fn tabs_sit_side_by_side_in_the_middle() {
-        assert_eq!(tab_left(Tab::Claude) + TAB_W / 2.0, EXPANDED.0 / 2.0);
-        assert_eq!(tab_left(Tab::Music) + TAB_W, tab_left(Tab::Claude));
-        assert_eq!(tab_left(Tab::Claude) + TAB_W, tab_left(Tab::Shelf));
+        for pair in TABS.windows(2) {
+            assert_eq!(tab_left(pair[0]) + TAB_W, tab_left(pair[1]));
+        }
+        assert_eq!(tab_left(Tab::Music) + tab_left(Tab::Timer) + TAB_W, EXPANDED.0);
         // Clear of the settings button, which keeps clear of the round end.
-        assert!(GEAR.0 >= tab_left(Tab::Shelf) + TAB_W && GEAR.0 + GEAR.2 <= EXPANDED.0 - 24.0);
+        assert!(GEAR.0 >= tab_left(Tab::Timer) + TAB_W && GEAR.0 + GEAR.2 <= EXPANDED.0 - 22.0);
         // The grown bubble beside the widest closed pill stays in the window.
         let closed = COMPACT.0 + HOVER.0;
         assert!(WIDEST / 2.0 >= closed / 2.0 + BUBBLE_GAP + BUBBLE_NEWS);
@@ -1496,10 +1770,25 @@ mod tests {
     }
 
     #[test]
+    fn bars_follow_the_level() {
+        assert_eq!(loudness(0.0), 0.0);
+        assert!((loudness(1.0) - 1.0).abs() < 1e-6);
+        assert!(loudness(0.5) > loudness(0.1) && loudness(0.1) > 0.0);
+        for bar in 0..BARS {
+            for step in 0..EQ_STEPS {
+                assert!((PAUSED_BAR..=1.0).contains(&bar_level(1.0, bar, step)), "bar {bar} step {step}");
+                assert_eq!(bar_level(0.0, bar, step), PAUSED_BAR); // silence looks paused
+            }
+        }
+    }
+
+    #[test]
     fn closed_pill_leaves_room_for_text() {
         // The music line's text next to the equalizer.
-        assert!(ITEMS_END - BARS_W - GAP - TEXT_X >= 150.0, "text squeezed by the equalizer");
+        assert!(ITEMS_END - TIMER_W.max(BARS_W) - GAP - TEXT_X >= 150.0, "text squeezed by the equalizer or a timer");
         // The grown bubble's words fit beside its mark.
         assert!(BUBBLE_NEWS - BUBBLE - 12.0 >= 140.0);
+        // The clock has room for the time and a long day ("30 Ağustos Cumartesi").
+        assert!(CLOCK.0 >= 120.0, "clock squeezed");
     }
 }

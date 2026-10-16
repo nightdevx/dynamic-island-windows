@@ -10,10 +10,13 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
+        Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT},
         Storage::FileSystem::*,
         System::{
             DataExchange::COPYDATASTRUCT,
             LibraryLoader::GetModuleHandleW,
+            SystemInformation::GetTickCount64,
+            WinRT::{RoInitialize, RO_INIT_MULTITHREADED},
             Ole::{IDropTarget, OleInitialize, RegisterDragDrop, RevokeDragDrop},
             Registry::*,
             Threading::INFINITE,
@@ -23,7 +26,7 @@ use windows::{
 };
 
 use crate::{
-    audio,
+    audio, bluetooth,
     claude::{self, Limits, Session, State},
     fullscreen,
     island::{self, Hit, Island, Line, Tab, View, TOP},
@@ -33,8 +36,9 @@ use crate::{
     preferences::{self, Preferences},
     settings::{self, Settings},
     shelf::{self, DropTarget, Shelf},
+    pages::{ORANGE, TEXT},
     text::{self, tr},
-    usage,
+    timer, usage,
 };
 
 const LEAVE_MS: u32 = 400;
@@ -53,6 +57,7 @@ const WM_VOLUME: u32 = WM_APP + 7;
 const WM_AUDIO_DEVICE: u32 = WM_APP + 8;
 const WM_DRAG_FILES: u32 = WM_APP + 10; // WPARAM: 1 files came over, 0 they left, 2 dropped
 const WM_NOTICE: u32 = WM_APP + 11; // a new Windows notification to preview
+const WM_BLUETOOTH: u32 = WM_APP + 12; // LPARAM: a Box<bluetooth::Device> the sound now goes to
 const NOTICE_MS: u32 = 4000;
 const SHELF_COPYDATA: usize = 0x5348_454C; // "SHEL": WM_COPYDATA from `island.exe --shelf`
 const VOLUME_MS: u32 = 1500;
@@ -66,6 +71,11 @@ const MINUTE_TIMER: usize = 4; // only while the Claude tab is on screen: reset 
 const SECOND_TIMER: usize = 5; // only while the music page is on screen and playing: elapsed time
 const SHOT_TIMER: usize = 6; // after the screenshots folder changes
 const BUBBLE_TIMER: usize = 7; // while the Claude bubble is grown
+const CLOCK_TIMER: usize = 8; // at each new minute, while the closed pill shows the clock
+const METER_TIMER: usize = 9; // the equalizer's steps, while music plays on the closed pill
+const METER_MS: u32 = 100;
+const TIMER_TICK: usize = 10; // each second the timer shows, while it runs
+const ALARM_MS: u32 = 6000; // the "time's up" peek
 const SHOT_DELAY_MS: u32 = 400;
 // The shelf's two lists.
 const FILES: usize = 0;
@@ -110,6 +120,8 @@ struct App {
     peek_tab: Tab, // the tab a peek opens to
     volume: Option<audio::Volume>,
     last_volume: Option<(u32, bool)>, // shown or current level and mute
+    metering: bool,                   // the equalizer follows the output's level now
+    timer: timer::Timer,
     shelves: [Shelf; 2], // FILES dropped on the island, SCREENSHOTS taken
     list: usize,         // which of them the shelf page shows
     dropping: bool,      // files are being dragged over the island
@@ -170,6 +182,8 @@ pub fn run() -> Result<()> {
         peek_tab: Tab::Claude,
         volume: None,
         last_volume: None,
+        metering: false,
+        timer: timer::Timer::new(),
         shelves: Default::default(),
         list: FILES,
         dropping: false,
@@ -333,7 +347,8 @@ impl App {
             }
             self.show_like();
             self.show_limit();
-            self.update_live();
+            self.show_timer(); // and the rest that lives
+
             log(format!("placed at scale {scale} on {}x{}", r.right - r.left, r.bottom - r.top));
         }
         self.set_region(self.pill_size());
@@ -523,14 +538,28 @@ impl App {
         let song = self.now_playing.as_ref().is_some_and(|m| m.playing || !m.title.is_empty());
         let line = if song { Line::Music } else { Line::Idle };
         let motion = animations_enabled();
-        let equalizer = playing && self.view == View::Compact && !self.hidden && self.settings.equalizer && motion;
+        // A running timer takes the equalizer's place.
+        let equalizer = playing && !self.timer.active() && self.view == View::Compact && !self.hidden && self.settings.equalizer && motion;
         let now = claude::now_ms();
         let before = self.pill_size();
+        // The bars follow how loud the output plays, or without a level meter, a wave.
+        let metered = self.volume.as_ref().is_some_and(|v| v.peak().is_some());
         if let Some(island) = self.island.as_mut() {
             island.set_full_motion(motion);
-            let updated = island.set_line(line, equalizer, self.settings.glow).and_then(|_| island.set_progress(self.now_playing.as_ref(), now));
+            let updated = island.set_line(line, equalizer && !metered, self.settings.glow).and_then(|_| island.set_progress(self.now_playing.as_ref(), now));
             if let Err(e) = updated {
                 log(format!("live parts failed: {e}"));
+            }
+        }
+        let metering = equalizer && metered;
+        if metering != self.metering {
+            self.metering = metering;
+            unsafe {
+                if metering {
+                    SetTimer(Some(self.hwnd), METER_TIMER, METER_MS, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), METER_TIMER);
+                }
             }
         }
         // Music starting or stopping changes the closed pill's width.
@@ -542,6 +571,90 @@ impl App {
             self.set_region(self.pill_size()); // the bubble may have come out or gone in
         }
         self.arm_clock();
+        self.show_clock(line == Line::Idle);
+    }
+
+    /// The closed pill's clock, with no song (or a running timer in its place): drawn now and
+    /// again at each new minute, only while it can be seen.
+    fn show_clock(&mut self, idle: bool) {
+        if !idle || self.hidden || self.view != View::Compact {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), CLOCK_TIMER);
+            }
+            return;
+        }
+        let clock = if self.timer.active() {
+            let paused = matches!(self.timer.state, timer::State::Paused { .. });
+            let caption = if paused { tr("Duraklatıldı", "Paused") } else { tr("Zamanlayıcı", "Timer") };
+            (timer::clock(self.timer.left(ticks())), caption.to_string(), ORANGE)
+        } else {
+            let (time, day) = text::clock();
+            (time, day, TEXT)
+        };
+        if let Some(Err(e)) = self.island.as_mut().map(|island| island.draw_clock(clock)) {
+            log(format!("clock failed: {e}"));
+        }
+        let to_next_minute = 60_000 - (claude::now_ms() % 60_000) as u32 + 50;
+        unsafe { SetTimer(Some(self.hwnd), CLOCK_TIMER, to_next_minute, None) };
+    }
+
+    /// The timer everywhere it shows: in the closed pill (in the clock's or the equalizer's
+    /// place) and on its page. While it runs it comes back each time the second shown changes.
+    fn show_timer(&mut self) {
+        let now = ticks();
+        let time = self.timer.active().then(|| timer::clock(self.timer.left(now)));
+        if let Some(Err(e)) = self.island.as_mut().map(|island| island.set_music_timer(time.as_deref())) {
+            log(format!("timer failed: {e}"));
+        }
+        self.draw_timer_page();
+        self.update_live(); // the clock's place, and the equalizer gives way
+        unsafe {
+            if matches!(self.timer.state, timer::State::Running { .. }) {
+                let next = match self.timer.left(now) % 1000 {
+                    0 => 1000,
+                    part => part,
+                };
+                SetTimer(Some(self.hwnd), TIMER_TICK, next as u32 + 5, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_TICK);
+            }
+        }
+    }
+
+    fn draw_timer_page(&self) {
+        if self.view != View::Expanded || self.tab() != Some(Tab::Timer) {
+            return;
+        }
+        if let Some(Err(e)) = self.island.as_ref().map(|island| island.draw_timer(&self.timer, ticks())) {
+            log(format!("timer page failed: {e}"));
+        }
+    }
+
+    /// A second of the timer has gone by; at the end the alarm rings and a peek says so, even
+    /// when the island should not disturb: the user set it.
+    fn timer_tick(&mut self) {
+        if self.timer.finished(ticks()) {
+            log("timer: time's up");
+            unsafe {
+                let _ = PlaySoundW(w!("Notification.Looping.Alarm"), None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+            }
+            let minutes = self.timer.minutes;
+            let text = tr(format!("Süre doldu · {minutes} dk"), format!("Time's up · {minutes} min"));
+            self.show_peek(Tab::Timer, ALARM_MS, |island| island.draw_peek(&text, Some(ORANGE)));
+        }
+        self.show_timer();
+    }
+
+    /// A step of the equalizer, with the output's level now.
+    fn meter_tick(&mut self) {
+        if !self.metering {
+            return; // a tick posted before the timer was stopped
+        }
+        let peak = self.volume.as_ref().and_then(audio::Volume::peak).unwrap_or(0.0);
+        if let Some(Err(e)) = self.island.as_mut().map(|island| island.show_level(peak)) {
+            log(format!("equalizer failed: {e}"));
+        }
+        unsafe { SetTimer(Some(self.hwnd), METER_TIMER, METER_MS, None) };
     }
 
     fn music_page_visible(&self) -> bool {
@@ -602,7 +715,14 @@ impl App {
     /// fullscreen apps and not when the user has it open already; newer news replaces a peek.
     /// A click on the peek opens `tab`.
     fn peek(&mut self, tab: Tab, ms: u32, draw: impl FnOnce(&mut Island) -> Result<()>) {
-        if self.hidden || self.view == View::Expanded || self.settings.do_not_disturb {
+        if !self.settings.do_not_disturb {
+            self.show_peek(tab, ms, draw);
+        }
+    }
+
+    /// As `peek`, even while the island should not disturb: for what the user asked for.
+    fn show_peek(&mut self, tab: Tab, ms: u32, draw: impl FnOnce(&mut Island) -> Result<()>) {
+        if self.hidden || self.view == View::Expanded {
             return;
         }
         let before = self.pill_size();
@@ -623,6 +743,35 @@ impl App {
     fn follow_audio(&mut self) {
         let Some(volume) = self.volume.as_mut() else { return };
         self.last_volume = volume.follow_default().map_err(|e| log(format!("volume device: {e}"))).ok();
+    }
+
+    /// The sound moved to another device: when it is a Bluetooth headset, a card with its name
+    /// and battery (WM_BLUETOOTH). Looked up off this thread; a headset that just connected
+    /// tells its battery a moment later, so a few tries a second apart.
+    fn find_headset(&self) {
+        if !self.settings.bluetooth_peek {
+            return;
+        }
+        let window = self.hwnd.0 as isize;
+        std::thread::spawn(move || {
+            if unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_err() {
+                return;
+            }
+            for attempt in 0..4 {
+                match bluetooth::output() {
+                    Ok(Some(device)) if device.battery.is_some() || attempt == 3 => {
+                        let device = Box::into_raw(Box::new(device));
+                        if unsafe { PostMessageW(Some(HWND(window as _)), WM_BLUETOOTH, WPARAM(0), LPARAM(device as isize)) }.is_err() {
+                            drop(unsafe { Box::from_raw(device) });
+                        }
+                        return;
+                    }
+                    Ok(Some(_)) => std::thread::sleep(std::time::Duration::from_secs(1)),
+                    Ok(None) => return,
+                    Err(e) => return log(format!("bluetooth: {e}")),
+                }
+            }
+        });
     }
 
     /// The system volume changed: a short peek with the level.
@@ -701,6 +850,7 @@ impl App {
             if tab == Tab::Shelf {
                 self.draw_shelf();
             }
+            self.draw_timer_page();
             self.update_live();
         }
         Ok(())
@@ -889,6 +1039,7 @@ impl App {
             self.reload_claude(true);
         } else {
             self.draw_shelf(); // when it is the page that opens
+            self.draw_timer_page();
             self.update_live();
         }
         Ok(())
@@ -1082,6 +1233,18 @@ impl App {
                 }
             }
             Hit::NextPlayer => self.media_command(Command::NextSession),
+            Hit::TimerMinutes(minutes) => {
+                self.timer.set_minutes(minutes);
+                self.show_timer();
+            }
+            Hit::TimerToggle => {
+                self.timer.toggle(ticks());
+                self.show_timer();
+            }
+            Hit::TimerReset => {
+                self.timer.reset();
+                self.show_timer();
+            }
             Hit::Settings => self.open_preferences(false),
         }
         Ok(())
@@ -1140,6 +1303,9 @@ impl App {
             WM_TIMER if wparam.0 == LEAVE_TIMER => self.set_view(View::Compact)?,
             WM_TIMER if wparam.0 == PEEK_TIMER && self.view == View::Peek => self.set_view(View::Compact)?,
             WM_TIMER if wparam.0 == BUBBLE_TIMER => self.show_news(None),
+            WM_TIMER if wparam.0 == CLOCK_TIMER => self.update_live(),
+            WM_TIMER if wparam.0 == METER_TIMER => self.meter_tick(),
+            WM_TIMER if wparam.0 == TIMER_TICK => self.timer_tick(),
             WM_TIMER if wparam.0 == MINUTE_TIMER && self.view == View::Expanded => self.reload_claude(true),
             WM_TIMER if wparam.0 == SECOND_TIMER => {
                 if let Some(island) = &self.island {
@@ -1211,12 +1377,27 @@ impl App {
                 }
                 return Ok(Some(LRESULT(1)));
             }
-            WM_AUDIO_DEVICE => self.follow_audio(),
+            WM_AUDIO_DEVICE => {
+                self.follow_audio();
+                self.update_live(); // the equalizer listens to the new device
+                self.find_headset();
+            }
+            WM_BLUETOOTH => {
+                let device = unsafe { Box::from_raw(lparam.0 as *mut bluetooth::Device) };
+                log(format!("bluetooth: {device:?}"));
+                self.peek(Tab::Music, NOTICE_MS, |island| island.draw_device(&device.name, device.battery));
+            }
             // On the open shelf the wheel scrolls its row; elsewhere it switches players.
             WM_MOUSEWHEEL if self.view == View::Expanded && self.tab() == Some(Tab::Shelf) => {
                 let delta = (wparam.0 >> 16) as u16 as i16;
                 self.shelves[self.list].scroll(if delta < 0 { 1 } else { -1 });
                 self.draw_shelf();
+            }
+            // On the timer page it sets the minutes.
+            WM_MOUSEWHEEL if self.view == View::Expanded && self.tab() == Some(Tab::Timer) => {
+                let delta = (wparam.0 >> 16) as u16 as i16;
+                self.timer.nudge(if delta > 0 { 1 } else { -1 });
+                self.show_timer();
             }
             WM_MOUSEWHEEL => self.media_command(Command::NextSession),
             WM_COMMAND => match wparam.0 & 0xFFFF {
@@ -1517,6 +1698,11 @@ fn open_settings(hwnd: HWND) {
 }
 
 /// Opens a file or a web page with what Windows opens it with.
+/// Milliseconds since Windows started: the timer's clock, which a change of the time does not move.
+fn ticks() -> u64 {
+    unsafe { GetTickCount64() }
+}
+
 fn shell_open(hwnd: HWND, target: &HSTRING) {
     unsafe { ShellExecuteW(Some(hwnd), w!("open"), target, None, None, SW_SHOWNORMAL) };
 }

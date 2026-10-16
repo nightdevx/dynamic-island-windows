@@ -1,6 +1,6 @@
 [package]
 name = "island"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 authors = ["nightdijital <iletisim@nightdijital.com>"]
 description = "Dynamic island for Windows"
@@ -12,7 +12,7 @@ publish = false
 [dependencies]
 windows-numerics = "0.3" # Vector2/Vector3 used by the windows crate's composition APIs
 windows-core = "0.62"    # named by the code `#[implement]` generates (COM callbacks)
-windows-collections = "0.3" # a WinRT list of names for the blur effect; already part of `windows`
+windows-collections = "0.3" # WinRT lists of names (the blur effect, device properties); already part of `windows`
 
 [dependencies.windows]
 version = "0.62"
@@ -25,7 +25,10 @@ features = [
     "Graphics_Effects",
     "ApplicationModel",
     "Foundation_Collections",
+    "Devices_Enumeration",
+    "Devices_Enumeration_Pnp",
     "Media_Control",
+    "Media_Devices",
     "Storage_Streams",
     "System",
     "UI",

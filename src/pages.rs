@@ -9,6 +9,7 @@ use crate::{
     media::{Art, Media},
     render::{Align, Canvas},
     text::tr,
+    timer::{State as TimerState, Timer, PRESETS},
 };
 
 pub const TEXT: u32 = 0xFFF2F2F7;
@@ -259,6 +260,18 @@ pub fn notice_icon(c: &Canvas, icon: Option<&Art>) -> Result<()> {
     }
 }
 
+/// A headset on the notification disc, its battery as a ring around it (red when low).
+pub fn device_icon(c: &Canvas, battery: Option<u8>) -> Result<()> {
+    let m = NOTICE_DISC / 2.0;
+    c.circle((m, m), m, 0xFF2C2C2E)?;
+    c.icon('\u{E7F6}', (0.0, 0.0, NOTICE_DISC, NOTICE_DISC), 20.0, TEXT)?; // Headphone
+    if let Some(percent) = battery {
+        let color = if percent < 20 { 0xFFFF453A } else { 0xFF30D158 };
+        c.ring((m, m), m - 2.5, 3.0, percent.min(100) as f32 / 100.0, color, FAINT)?;
+    }
+    Ok(())
+}
+
 /// A notification's words in a `(w, h)` pill, right of its icon: the sender, the title, a
 /// line of the text.
 pub fn notice(c: &Canvas, (w, h): (f32, f32), notice: &crate::notices::Notice) -> Result<()> {
@@ -275,6 +288,54 @@ pub fn notice(c: &Canvas, (w, h): (f32, f32), notice: &crate::notices::Notice) -
         y += row_h;
     }
     Ok(())
+}
+
+// Timer page: the time big in the middle, the minutes on offer under it, then reset and
+// start/pause.
+pub const ORANGE: u32 = 0xFFFF9F0A;
+const CHIP: (f32, f32) = (46.0, 26.0);
+pub const TIMER_RESET: (f32, f32, f32, f32) = (PAGE.0 / 2.0 - 44.0, 102.0, 36.0, 36.0);
+pub const TIMER_TOGGLE: (f32, f32, f32, f32) = (PAGE.0 / 2.0 + 8.0, 102.0, 36.0, 36.0);
+
+/// The chip for `timer::PRESETS[i]`.
+pub fn timer_chip(i: usize) -> (f32, f32, f32, f32) {
+    let (n, gap) = (PRESETS.len() as f32, 8.0);
+    let left = (PAGE.0 - n * CHIP.0 - (n - 1.0) * gap) / 2.0;
+    (left + i as f32 * (CHIP.0 + gap), 66.0, CHIP.0, CHIP.1)
+}
+
+/// The timer at `now`, on its clock.
+pub fn timer_page(c: &Canvas, timer: &Timer, now: u64) -> Result<()> {
+    let state = timer.state;
+    let paused = matches!(state, TimerState::Paused { .. });
+    c.text(&crate::timer::clock(timer.left(now)), (0.0, 0.0, PAGE.0, 46.0), 38.0, true, if paused { DIM } else { TEXT }, Align::Center)?;
+    let (caption, color) = match state {
+        TimerState::Ready if timer.done => (tr("Süre doldu", "Time's up"), ORANGE),
+        TimerState::Ready => (tr("Süre seçin", "Pick a time"), DIM),
+        TimerState::Running { .. } => (tr("Kalan süre", "Time left"), DIM),
+        TimerState::Paused { .. } => (tr("Duraklatıldı", "Paused"), DIM),
+    };
+    c.text(caption, (0.0, 44.0, PAGE.0, 16.0), 11.0, false, color, Align::Center)?;
+    for (i, &minutes) in PRESETS.iter().enumerate() {
+        let chip = timer_chip(i);
+        let chosen = minutes == timer.minutes;
+        c.round_rect(chip, CHIP.1 / 2.0, if chosen { 0x40FFFFFF } else { 0x1AFFFFFF })?;
+        let label = tr(format!("{minutes} dk"), format!("{minutes} min"));
+        c.text(&label, chip, 11.5, true, if chosen { TEXT } else { DIM }, Align::Center)?;
+    }
+    let disc = |(x, y, w, _): (f32, f32, f32, f32), color| c.circle((x + w / 2.0, y + w / 2.0), w / 2.0, color);
+    disc(TIMER_RESET, 0x2EFFFFFF)?;
+    c.icon('\u{E72C}', TIMER_RESET, 14.0, TEXT)?; // Refresh
+    disc(TIMER_TOGGLE, ORANGE)?;
+    // Filled, like the music page's buttons.
+    let (cx, cy) = (TIMER_TOGGLE.0 + TIMER_TOGGLE.2 / 2.0, TIMER_TOGGLE.1 + TIMER_TOGGLE.3 / 2.0);
+    let black = 0xFF000000;
+    if matches!(state, TimerState::Running { .. }) {
+        c.round_rect((cx - 5.5, cy - 6.5, 4.0, 13.0), 1.4, black)?;
+        c.round_rect((cx + 1.5, cy - 6.5, 4.0, 13.0), 1.4, black)
+    } else {
+        c.polygon(&[(cx - 3.5, cy - 6.5), (cx + 6.5, cy), (cx - 3.5, cy + 6.5)], 2.4, black)
+    }
 }
 
 /// Shuffle or repeat: bright with a dot under it when on, dim when off.
@@ -515,5 +576,22 @@ mod tests {
             assert_eq!(center(i) - center(i - 1), 53.0, "button {i} is off the grid");
         }
         assert!(BUTTON_X[0] >= 18.0 && BUTTON_X[4] + BUTTON <= PAGE.0 - 18.0);
+    }
+
+    #[test]
+    fn timer_page_fits() {
+        let (first, last) = (timer_chip(0), timer_chip(PRESETS.len() - 1));
+        assert!((first.0 - (PAGE.0 - (last.0 + last.2))).abs() < 0.01, "chips not centered");
+        assert!(first.0 >= 18.0 && first.1 + first.3 <= TIMER_TOGGLE.1 - 6.0);
+        assert!(TIMER_TOGGLE.1 + TIMER_TOGGLE.3 <= PAGE.1 - 4.0);
+        // A look at it, running and paused, in the temp folder.
+        let dir = std::env::temp_dir().join("island-pages");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut timer = Timer::new();
+        timer.toggle(0);
+        crate::render::to_png(PAGE, 1.5, &dir.join("timer-running.png"), |c| timer_page(c, &timer, 83_500)).unwrap();
+        timer.toggle(83_500);
+        crate::render::to_png(PAGE, 1.5, &dir.join("timer-paused.png"), |c| timer_page(c, &timer, 90_000)).unwrap();
+        crate::render::to_png((NOTICE_DISC, NOTICE_DISC), 3.0, &dir.join("device.png"), |c| device_icon(c, Some(80))).unwrap();
     }
 }

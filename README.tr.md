@@ -30,14 +30,17 @@
 
 ## Özellikler
 
-- **Çalan müzik:** Windows medya kontrollerinde görünen her oynatıcı (Spotify, tarayıcılar, Medya Oynatıcı, Apple Music…). Şarkı, sanatçı, kapak ve ilerleme. Önceki, oynat/duraklat, sonraki, karıştır ve tekrar düğmeleri (oynatıcı destekliyorsa). İlerleme çubuğuna tıklayınca o yere atlar. Kapağa ya da şarkı adına tıklayınca oynatıcı, tarayıcıdaki sekmesine kadar öne gelir. Birden fazla oynatıcı açıksa aralarında açık island'dan ya da fare tekerleğiyle geçilir. Müzik çalarken kapalı hap kapağın renklerini alır, küçük bir ekolayzer döner ve kenarında soluk bir parıltı olur.
+- **Çalan müzik:** Windows medya kontrollerinde görünen her oynatıcı (Spotify, tarayıcılar, Medya Oynatıcı, Apple Music…). Şarkı, sanatçı, kapak ve ilerleme. Önceki, oynat/duraklat, sonraki, karıştır ve tekrar düğmeleri (oynatıcı destekliyorsa). İlerleme çubuğuna tıklayınca o yere atlar. Kapağa ya da şarkı adına tıklayınca oynatıcı, tarayıcıdaki sekmesine kadar öne gelir. Birden fazla oynatıcı açıksa aralarında açık island'dan ya da fare tekerleğiyle geçilir. Duraklatılan şarkı da kapalı hapta kalır. Müzik çalarken kapalı hap kapağın renklerini alır, kenarında soluk bir parıltı olur ve küçük ekolayzer müziğin sesine göre oynar. Kapalı hapa sığmayan şarkı adı bir kez kayarak geçer.
 - **Beğenilen şarkılar:** müzik sayfasındaki kalbe dokunun, şarkı listenize eklensin. Listeyi Ayarlar → Beğenilenler'de bulursunuz; bir şarkıya tıklayınca YouTube Music'te aranır.
-- **Claude Code:** açık oturumlar ve ne yaptıkları (çalışıyor, izin bekliyor, yanıt hazır), 5 saatlik ve haftalık plan limitlerinin ne kadarının kullanıldığı. Bir oturuma tıklamak onun penceresini öne getirir. 5 saatlik limit island'ın yanındaki küçük bir baloncukta durur; bir oturum sizi bekleyince ya da bitince baloncuk büyüyüp bunu birkaç saniye gösterir (varsayılan 10 sn, ayarlanabilir).
+- **Claude Code:** açık oturumlar ve ne yaptıkları (çalışıyor, izin bekliyor, yanıt hazır), 5 saatlik ve haftalık plan limitlerinin ne kadarının kullanıldığı. Bir oturuma tıklamak onun penceresini öne getirir. 5 saatlik limit kapalı island'ın sağ ucunda durur, müzik başlayınca yanındaki kendi küçük baloncuğuna geçer; bir oturum sizi bekleyince ya da bitince baloncuk büyüyüp bunu birkaç saniye gösterir (varsayılan 10 sn, ayarlanabilir).
 - **Bildirimler:** Windows'a gelen yeni bildirimler island'da uygulamanın logosuyla kısa bir önizleme olarak görünür. Island'ın Windows'tan ayrı kendi "Rahatsız etmeyin" ayarı var.
 - **Dosya rafı:** dosyaları island'a sürükleyin (ya da sağ tık → Gönder → Dynamic Island), rafında beklesinler; sonra oradan istediğiniz klasöre, e-postaya ya da sohbete sürükleyin. Dosyalarınız yerinden oynamaz: raf yalnızca nerede olduklarını hatırlar, bırakınca kopyalanır.
 - **Rafta ekran görüntüleri:** island açıkken aldığınız her ekran görüntüsü (Win + PrtScn, Ekran Alıntısı Aracı) kısa bir önizlemeyle rafın ikinci listesine, çekildiği saatle eklenir. Dosya rafı gibi anlıktır: eski görüntüler listelenmez, temizlediğiniz bir görüntü bir daha gösterilmez.
 - **Toplu seçim:** iki listede de tıklayarak seçin, seçilenlerin hepsini birden sürükleyip bırakın. Çift tıklama dosyayı açar; uzun listeyi fare tekerleği kaydırır.
 - **Ses seviyesi:** sistem sesi değişince seviye kısa süre görünür.
+- **Saat:** çalan ya da duraklatılmış şarkı yokken kapalı island saati ve günü gösterir.
+- **Zamanlayıcı:** Sayaç sekmesi seçtiğiniz dakikadan geri sayar (1-45, fare tekerleğiyle istediğiniz kadar). Çalışırken kapalı island kalan süreyi gösterir; süre dolunca alarm çalar ve island bunu söyler.
+- **Bluetooth kulaklık:** ses bir Bluetooth kulaklığa geçince adı ve Windows biliyorsa pili bir kartla görünür.
 - **Yolunuza çıkmaz:** tam ekran uygulamalarda ve oyunlarda kendiliğinden gizlenir, diğer zamanlarda pencerelerin üstünde kalır.
 - **Ayarlar penceresi:** her seçenek tek yerde; Windows'a göre açık ya da koyu, Türkçe ya da İngilizce.
 
@@ -65,7 +68,7 @@ Gereksinimler: Windows 10 (1809) veya Windows 11, 64 bit. Arayüz Windows'un dil
 
 ## Kullanım
 
-- Açmak için island'ın üzerine gelin ya da tıklayın. Üstteki sekmeler Müzik, Claude ve Raf arasında geçer; sağdaki dişli ayarları açar.
+- Açmak için island'ın üzerine gelin ya da tıklayın. Üstteki sekmeler Müzik, Claude, Raf ve Sayaç arasında geçer; sağdaki dişli ayarları açar.
 - Island'ın üzerinde fare tekerleği: başka oynatıcıya geçer.
 - Dosyaları island'a sürükleyin: rafa konur. Rafta (Dosyalar ve Ekran görüntüleri) tıklayarak seçin, birini sürükleyince seçilenlerin hepsi bırakılır ve raftan kalkar; çift tıklama açar. "Tümünü seç" hepsini seçer; "Kaldır" / "Temizle" öğeleri listeden çıkarır, dosyaları silmez.
 - Island'a ya da tepsi simgesine sağ tık: başlangıçta çalıştır, ayarlar, beğenilen şarkılar, rahatsız etmeyin, çıkış.
@@ -85,6 +88,7 @@ Ayarlar penceresini açık island'daki dişliden, sağ tık menüsünden ya da u
 | `glow` | `true` | Müzik çalarken kapak renginde soluk parıltı |
 | `song_peek` | `true` | Yeni şarkı başlayınca kısa süre göster |
 | `volume_peek` | `true` | Sistem sesi değişince seviyeyi göster |
+| `bluetooth_peek` | `true` | Bluetooth kulaklık bağlanınca adı ve pili |
 | `claude_peek` | `true` | Bir Claude oturumu sizi bekleyince ya da bitince baloncuk büyür |
 | `claude_news_seconds` | `10` | Baloncuğun büyük kalacağı süre (saniye) |
 | `notifications` | `true` | Yeni bildirimleri kısa önizlemeyle göster |

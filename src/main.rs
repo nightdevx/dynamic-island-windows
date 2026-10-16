@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod bluetooth;
 mod blur;
 mod claude;
 mod fullscreen;
@@ -16,6 +17,7 @@ mod render;
 mod settings;
 mod shelf;
 mod text;
+mod timer;
 mod usage;
 mod window;
 

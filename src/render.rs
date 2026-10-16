@@ -87,6 +87,20 @@ impl Painter {
         )
     }
 
+    /// How wide `text` is in DIPs on one line, as `Canvas::text` draws it.
+    pub fn text_width(&self, text: &str, size: f32, bold: bool) -> Result<f32> {
+        let family = if size >= 14.0 { w!("Segoe UI Variable Display") } else { w!("Segoe UI Variable Text") };
+        let weight = if bold { DWRITE_FONT_WEIGHT_SEMI_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL };
+        unsafe {
+            let format = self.dwrite.CreateTextFormat(family, None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, w!("tr-TR"))?;
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let layout = self.dwrite.CreateTextLayout(&wide, &format, f32::MAX, f32::MAX)?;
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            layout.GetMetrics(&mut metrics)?;
+            Ok(metrics.widthIncludingTrailingWhitespace)
+        }
+    }
+
     /// Clears and redraws the whole surface.
     pub fn draw(&self, surface: &CompositionDrawingSurface, paint: impl FnOnce(&Canvas) -> Result<()>) -> Result<()> {
         let interop: ICompositionDrawingSurfaceInterop = surface.cast()?;

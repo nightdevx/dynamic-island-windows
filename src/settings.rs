@@ -21,6 +21,8 @@ pub struct Settings {
     pub song_peek: bool,
     /// A peek with the level when the system volume changes.
     pub volume_peek: bool,
+    /// A card with a Bluetooth headset's name and battery when the sound moves to it.
+    pub bluetooth_peek: bool,
     /// The bubble grows when a Claude session starts waiting on the user.
     pub claude_peek: bool,
     /// How long it stays grown, seconds.
@@ -44,6 +46,7 @@ impl Default for Settings {
             glow: true,
             song_peek: true,
             volume_peek: true,
+            bluetooth_peek: true,
             claude_peek: true,
             claude_news_seconds: 10,
             notifications: true,
@@ -86,6 +89,12 @@ pub fn file_text(s: &Settings) -> String {
         ("Müzik çalarken island'ın kenarında kapak renginde hafif bir parıltı.", "A soft glow in the cover's color around the island while music plays.", "glow", s.glow.to_string()),
         ("Yeni şarkı başlayınca island kısa süre açılıp şarkıyı göstersin mi?", "Show the new song for a moment when one starts?", "song_peek", s.song_peek.to_string()),
         ("Sistem sesi değişince island seviyeyi göstersin mi?", "Show the level when the system volume changes?", "volume_peek", s.volume_peek.to_string()),
+        (
+            "Bluetooth kulaklık bağlanınca adı ve pili kısa süre görünsün mü?",
+            "Show a Bluetooth headset's name and battery for a moment when it connects?",
+            "bluetooth_peek",
+            s.bluetooth_peek.to_string(),
+        ),
         (
             "Bir Claude oturumu izin isteyince ya da cevabı bitince island'ın yanındaki baloncuk büyüyüp bunu göstersin mi?",
             "Grow the bubble beside the island when a Claude session asks for permission or finishes an answer?",
@@ -193,6 +202,7 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
             "glow" => value.parse().map(|v| settings.glow = v).is_ok(),
             "song_peek" => value.parse().map(|v| settings.song_peek = v).is_ok(),
             "volume_peek" => value.parse().map(|v| settings.volume_peek = v).is_ok(),
+            "bluetooth_peek" => value.parse().map(|v| settings.bluetooth_peek = v).is_ok(),
             "claude_peek" => value.parse().map(|v| settings.claude_peek = v).is_ok(),
             "notifications" => value.parse().map(|v| settings.notifications = v).is_ok(),
             "do_not_disturb" => value.parse().map(|v| settings.do_not_disturb = v).is_ok(),
@@ -236,6 +246,7 @@ mod tests {
             glow: false,
             song_peek: false,
             volume_peek: false,
+            bluetooth_peek: false,
             claude_peek: false,
             claude_news_seconds: 30,
             notifications: false,
