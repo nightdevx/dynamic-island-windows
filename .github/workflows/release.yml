@@ -46,5 +46,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ github.ref_name }}'
+          # Checkout leaves the tag without its message; fetch the tag itself for the notes.
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
           $files = (Get-ChildItem dist\*.exe).FullName
           gh release create $tag @files --title "Dynamic Island $($tag.TrimStart('v'))" --notes-from-tag --verify-tag
