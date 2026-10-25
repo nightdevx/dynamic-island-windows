@@ -41,6 +41,7 @@
 - **Clock:** with no song on, the closed island shows the time and the day.
 - **Timer:** the Timer tab counts down the minutes you pick (1 to 45, or any with the mouse wheel). While it runs, the closed island shows the time left; at the end an alarm sounds and the island says so.
 - **Bluetooth headphones:** when the sound moves to a Bluetooth headset, a card shows its name and, when Windows knows it, its battery.
+- **Razer Barracuda X battery** (Barracuda build): the 2022 headset's battery through its 2.4 GHz dongle, in the closed island and the tab bar, with a peek when it starts charging or runs low. Both versions of the dongle work (USB 1532:0550 and 1532:0552), and it gets along with the BarracudaBattery app.
 - **Out of the way:** hides by itself in fullscreen apps and games, and stays above other windows otherwise.
 - **Settings window:** every option in one place, light or dark with Windows, in Turkish or English.
 
@@ -57,7 +58,7 @@ The island is a native Rust app with no runtime or browser engine. Every animati
 
 ## Install
 
-Download `DynamicIsland-Setup-<version>.exe` from [Releases](https://github.com/nightdevx/dynamic-island-windows/releases/latest) and run it. No administrator rights are needed; it installs for your user only. During setup you can choose:
+Download `DynamicIsland-Setup-<version>.exe` from [Releases](https://github.com/nightdevx/dynamic-island-windows/releases/latest) and run it. With a Razer Barracuda X (2022) on its 2.4 GHz dongle, take `DynamicIsland-Barracuda-Setup-<version>.exe` instead: the same island, plus the headset's battery. Either installs over the other. No administrator rights are needed; it installs for your user only. During setup you can choose:
 
 - **Start with Windows**
 - **Connect to Claude Code** (offered when Claude Code is installed): adds the island's hooks to `~/.claude/settings.json` so the Claude tab sees your sessions. Everything else in the file stays as it is, and a backup is saved next to it the first time. Uninstalling removes the hooks again.
@@ -136,10 +137,13 @@ You need Rust (stable, MSVC toolchain) and, for the installer, [Inno Setup 6](ht
 
 ```powershell
 cargo build --release                      # island.exe
+cargo build --release --features headset   # the Barracuda build
 cargo test
-powershell -File scripts\package.ps1       # installer: dist\DynamicIsland-Setup-<version>.exe
+powershell -File scripts\package.ps1       # both installers: dist\DynamicIsland-Setup-<version>.exe, dist\DynamicIsland-Barracuda-Setup-<version>.exe
 powershell -File scripts\make-icon.ps1     # redraws assets\island.ico
 ```
+
+Releases are built on GitHub: pushing a version tag (`git tag -a v1.2.3 -F notes.md`, then `git push origin v1.2.3`) runs `.github/workflows/release.yml`, which tests both builds, makes both installers and publishes them with the tag's message as the notes.
 
 How it is put together:
 
@@ -150,6 +154,7 @@ How it is put together:
 | `src/pages.rs`, `src/render.rs` | What gets drawn (Direct2D/DirectWrite) |
 | `src/media.rs`, `src/player.rs` | Windows media sessions on their own thread; bringing a player to the front |
 | `src/timer.rs`, `src/bluetooth.rs` | The timer; which Bluetooth headset plays |
+| `src/headset.rs`, `src/barracuda.rs` | A headset's battery; the Barracuda X dongle (Barracuda build) |
 | `src/liked.rs` | Liked songs |
 | `src/notices.rs` | Windows notifications |
 | `src/preferences.rs`, `src/settings.rs`, `src/text.rs` | The settings window, the settings file, Turkish and English texts |

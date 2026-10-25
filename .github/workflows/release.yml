@@ -1,0 +1,50 @@
+# Builds both installers (normal and Barracuda) and publishes them when a version tag is pushed.
+# The release notes are the tag's message:
+#   git tag -a v1.2.3 -F notes.md
+#   git push origin v1.2.3
+# Run by hand (Actions → Release → Run workflow) it only builds them, as a downloadable artifact.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup update stable --no-self-update; rustup default stable
+
+      - name: Tests
+        run: |
+          cargo test
+          if ($LASTEXITCODE) { exit 1 }
+          cargo test --features headset
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Installers
+        run: powershell -File scripts\package.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: dist/*.exe
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $files = (Get-ChildItem dist\*.exe).FullName
+          gh release create $tag @files --title "Dynamic Island $($tag.TrimStart('v'))" --notes-from-tag --verify-tag

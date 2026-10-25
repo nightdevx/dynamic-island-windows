@@ -9,6 +9,14 @@ repository = "https://github.com/nightdevx/dynamic-island-windows"
 license = "MIT"
 publish = false
 
+[features]
+# The Barracuda build: a Razer Barracuda X (2022) headset's battery, through its 2.4 GHz dongle.
+headset = [
+    "windows/Win32_Devices_DeviceAndDriverInstallation",
+    "windows/Win32_Devices_HumanInterfaceDevice",
+    "windows/Win32_System_IO",
+]
+
 [dependencies]
 windows-numerics = "0.3" # Vector2/Vector3 used by the windows crate's composition APIs
 windows-core = "0.62"    # named by the code `#[implement]` generates (COM callbacks)

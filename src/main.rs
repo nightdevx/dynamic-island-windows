@@ -1,10 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+#[cfg(feature = "headset")]
+mod barracuda; // the Barracuda build's dongle
 mod bluetooth;
 mod blur;
 mod claude;
 mod fullscreen;
+mod headset;
 mod island;
 mod json;
 mod liked;

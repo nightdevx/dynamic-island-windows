@@ -18,6 +18,7 @@ use windows_numerics::{Vector2, Vector3};
 use crate::{
     blur,
     claude::{Limits, Session},
+    headset::Battery,
     media::{Art, Media},
     notices::Notice,
     shelf,
@@ -51,13 +52,16 @@ const HOVER: (f32, f32) = (6.0, 2.0); // the closed pill grows this much under t
 const SHADOW: [f32; 3] = [14.0, 8.0, 3.5];
 const SHADOW_ALPHA: u32 = 0x12;
 
-// Compact: while a song is on (playing or paused), the art, two lines of text and the equalizer on the right (the
-// text's surface spans from TEXT_X to the pill's end); otherwise a pill IDLE wide with a clock,
-// and the bubble's ring docked in its right end.
-const IDLE: f32 = 220.0;
-/// The clock: the time over the day, left in the empty pill.
+// Compact: while a song is on (playing or paused), the art, two lines of text, the equalizer
+// and at the right end the headset battery when there is one (the text's surface spans from
+// TEXT_X to the pill's end); otherwise a pill IDLE wide with a clock, the headset battery and
+// the bubble's ring docked in its right end. Only the Barracuda build makes room for a headset
+// in the empty pill.
+const HEADSET_BUILD: bool = cfg!(feature = "headset");
+const IDLE: f32 = if HEADSET_BUILD { 240.0 } else { 220.0 };
+/// The clock: the time over the day, left in the empty pill, clear of the headset battery.
 const CLOCK_X: f32 = 22.0;
-const CLOCK: (f32, f32) = (IDLE - CLOCK_X - BUBBLE - 6.0, COMPACT.1);
+const CLOCK: (f32, f32) = (IDLE - CLOCK_X - BUBBLE - if HEADSET_BUILD { pages::HEADSET_W + 2.0 } else { 6.0 }, COMPACT.1);
 const TEXT_X: f32 = 46.0;
 const LINES: (f32, f32) = (COMPACT.0 - TEXT_X, COMPACT.1);
 const SMALL_ART: f32 = 30.0;
@@ -71,8 +75,11 @@ const BAR_H: f32 = 14.0;
 const PAUSED_BAR: f32 = 0.25; // of BAR_H: every bar, while the song is paused
 const BARS_W: f32 = BARS as f32 * (BAR_W + 3.0) - 3.0;
 
-/// Where the line's own item ends, from the pill's left.
-const ITEMS_END: f32 = COMPACT.0 - EDGE;
+/// Where the line's own item ends, from the pill's left: before the headset battery, if any.
+fn items_end(headset: bool) -> f32 {
+    COMPACT.0 - EDGE - if headset { pages::HEADSET_W + 8.0 } else { 0.0 }
+}
+
 /// A running timer's time, in the equalizer's place; the title keeps clear of it.
 const TIMER_W: f32 = 40.0;
 // A title too long for its place scrolls by at this speed (DIPs a second), this long after it
@@ -208,6 +215,7 @@ pub struct Island {
     clock: (String, String, u32), // what it shows: the time and the day, or a timer; color
     music_line: ContainerVisual,
     title_surface: CompositionDrawingSurface,
+    music_text: (String, String), // title and artist, for a redraw when the layout changes
     title_text: SpriteVisual,
     title_clip: ContainerVisual,  // the title's place, as wide as the line gives it
     title_still: ContainerVisual, // the title as drawn, cut with "…"
@@ -218,6 +226,9 @@ pub struct Island {
     marquee_due: bool,              // it has yet to scroll by where it can be seen
     marquee_until: Option<Instant>, // when the scroll under way ends
     bars: Vec<SpriteVisual>,
+    headset: SpriteVisual,
+    headset_surface: CompositionDrawingSurface,
+    battery: Option<Battery>,
     timer_text: SpriteVisual, // a running timer, in the equalizer's place
     timer_surface: CompositionDrawingSurface,
     timer_shown: Option<String>,
@@ -241,6 +252,7 @@ pub struct Island {
     notice_surface: CompositionDrawingSurface,
     ripple: ShapeVisual, // a soft ring spreading from the icon to the pill's round end
     expanded: LayerVisual,
+    header_surface: CompositionDrawingSurface,
     highlight: ShapeVisual,
     pages: [ContainerVisual; 4],
     page_surfaces: [CompositionDrawingSurface; 4],
@@ -272,6 +284,7 @@ pub struct Island {
     line: Line,
     still: Option<bool>, // the bars rest (Some: low and even when paused) or move (None)
     loud: f32,           // how loud the output plays, 0..1, as the equalizer shows it
+    ceiling: f32,        // the loudest of late, dB: the equalizer's scale
     level_step: usize,   // the equalizer's steps so far, for each bar's wave
     glowing: bool,
 }
@@ -532,8 +545,8 @@ impl Island {
         music_line.Children()?.InsertAtTop(&title_clip)?;
         let mut bars = Vec::new();
         for i in 0..BARS {
-            let x = ITEMS_END - BARS_W + i as f32 * (BAR_W + 3.0);
-            let bar = sprite(&accent_brush, at(x, (COMPACT.1 - BAR_H) / 2.0), (BAR_W, BAR_H))?;
+            // Placed by draw_music_line, which knows whether the headset takes the right end.
+            let bar = sprite(&accent_brush, at(0.0, (COMPACT.1 - BAR_H) / 2.0), (BAR_W, BAR_H))?;
             // Grow from the bottom.
             bar.SetCenterPoint(Vector3 { X: 0.0, Y: px((0.0, BAR_H)).Y, Z: 0.0 })?;
             bar.SetScale(Vector3 { X: 1.0, Y: bar_height(i, 0), Z: 1.0 })?;
@@ -541,10 +554,17 @@ impl Island {
             bars.push(bar);
         }
         let timer_surface = painter.surface((TIMER_W, COMPACT.1))?;
-        let timer_text = sprite(&surface_brush(&timer_surface)?, at(ITEMS_END - TIMER_W, 0.0), (TIMER_W, COMPACT.1))?;
+        // Placed by draw_music_line, which knows whether the headset takes the right end.
+        let timer_text = sprite(&surface_brush(&timer_surface)?, at(0.0, 0.0), (TIMER_W, COMPACT.1))?;
         timer_text.SetOpacity(0.0)?;
         music_line.Children()?.InsertAtTop(&timer_text)?;
         compact.Children()?.InsertAtTop(&music_line)?;
+        // The headset battery: left of the docked ring in the empty pill, at the right end of
+        // the music line.
+        let headset_surface = painter.surface((pages::HEADSET_W, COMPACT.1))?;
+        let headset = sprite(&surface_brush(&headset_surface)?, at(IDLE - BUBBLE - pages::HEADSET_W + 2.0, 0.0), (pages::HEADSET_W, COMPACT.1))?;
+        headset.SetOpacity(0.0)?;
+        compact.Children()?.InsertAtTop(&headset)?;
         content.Children()?.InsertAtTop(&compact)?;
 
         // Peek: one line, with the art when it is about music.
@@ -602,12 +622,6 @@ impl Island {
         expanded.Children()?.InsertAtTop(&highlight)?;
 
         let header_surface = painter.surface((EXPANDED.0, PAGE_Y))?;
-        painter.draw(&header_surface, |c| {
-            for (tab, label) in TABS.into_iter().zip([tr("Müzik", "Music"), "Claude", tr("Raf", "Shelf"), tr("Sayaç", "Timer")]) {
-                c.text(label, (tab_left(tab), TAB_Y, TAB_W, TAB_H), 12.5, true, TEXT, Align::Center)?;
-            }
-            c.icon('\u{E713}', GEAR, 13.0, pages::DIM) // Setting
-        })?;
         expanded.Children()?.InsertAtTop(&sprite(&surface_brush(&header_surface)?, at(0.0, 0.0), (EXPANDED.0, PAGE_Y))?)?;
 
         fn fail<T>(_: T) -> Error {
@@ -721,6 +735,7 @@ impl Island {
             clock: Default::default(),
             music_line,
             title_surface,
+            music_text: (String::new(), String::new()),
             title_text,
             title_clip,
             title_still,
@@ -731,6 +746,9 @@ impl Island {
             marquee_due: false,
             marquee_until: None,
             bars,
+            headset,
+            headset_surface,
+            battery: None,
             timer_text,
             timer_surface,
             timer_shown: None,
@@ -753,6 +771,7 @@ impl Island {
             notice_surface,
             ripple,
             expanded,
+            header_surface,
             highlight,
             pages,
             page_surfaces,
@@ -783,13 +802,58 @@ impl Island {
             line: Line::Idle,
             still: Some(false),
             loud: 0.0,
+            ceiling: -45.0,
             level_step: 0,
             glowing: false,
         };
         island.set_media(None, 0)?;
         island.set_art(None, false)?;
         island.draw_shelf(&shelf::Shelf::default(), 0, [0, 0], false)?;
+        island.draw_header()?;
         Ok(island)
+    }
+
+    /// The tab bar's labels, and the headset battery left of them when there is one.
+    fn draw_header(&self) -> Result<()> {
+        self.painter.draw(&self.header_surface, |c| {
+            for (tab, label) in TABS.into_iter().zip([tr("Müzik", "Music"), "Claude", tr("Raf", "Shelf"), tr("Sayaç", "Timer")]) {
+                c.text(label, (tab_left(tab), TAB_Y, TAB_W, TAB_H), 12.5, true, TEXT, Align::Center)?;
+            }
+            c.icon('\u{E713}', GEAR, 13.0, pages::DIM)?; // Setting
+            match self.battery {
+                Some(battery) => pages::headset(c, (12.0, TAB_Y, TAB_H), battery),
+                None => Ok(()),
+            }
+        })
+    }
+
+    /// The headset battery, in the closed pill and in the tab bar.
+    pub fn set_headset(&mut self, battery: Option<Battery>) -> Result<()> {
+        let moved = battery.is_some() != self.battery.is_some();
+        self.battery = battery;
+        self.draw_header()?;
+        if let Some(battery) = battery {
+            self.painter.draw(&self.headset_surface, |c| pages::headset(c, (0.0, 0.0, COMPACT.1), battery))?;
+        }
+        self.crossfade(&self.headset.cast()?, battery.is_some(), 200)?;
+        if moved {
+            self.draw_music_line()?;
+        }
+        Ok(())
+    }
+
+    /// The music line's text, equalizer and timer, laid out around the headset battery.
+    fn draw_music_line(&mut self) -> Result<()> {
+        let end = items_end(self.battery.is_some());
+        for (i, bar) in self.bars.iter().enumerate() {
+            let p = self.painter.px((end - BARS_W + i as f32 * (BAR_W + 3.0), (COMPACT.1 - BAR_H) / 2.0));
+            bar.SetOffset(Vector3 { X: p.X, Y: p.Y, Z: 0.0 })?;
+        }
+        self.timer_text.SetOffset(Vector3 { X: self.painter.px((end - TIMER_W, 0.0)).X, Y: 0.0, Z: 0.0 })?;
+        let (title, detail) = self.music_text.clone();
+        let w = end - TIMER_W.max(BARS_W) - GAP - TEXT_X;
+        self.painter.draw(&self.title_surface, |c| pages::two_lines(c, &title, &detail, TEXT, w, COMPACT.1))?;
+        self.scroll_title(&title, &detail, w)
     }
 
     pub fn tab(&self) -> Tab {
@@ -1099,15 +1163,13 @@ impl Island {
         self.painter.draw(&self.page_surfaces[Tab::Music.index()], |c| pages::music_page(c, media))?;
         // Title over artist; without a title the player's name leads, and without an artist
         // the player's name goes under the title.
-        let (title, detail) = match media {
-            Some(m) if m.title.is_empty() => (m.app.as_str(), m.artist.as_str()),
-            Some(m) if m.artist.is_empty() => (m.title.as_str(), m.app.as_str()),
-            Some(m) => (m.title.as_str(), m.artist.as_str()),
-            None => ("", ""),
+        self.music_text = match media {
+            Some(m) if m.title.is_empty() => (m.app.clone(), m.artist.clone()),
+            Some(m) if m.artist.is_empty() => (m.title.clone(), m.app.clone()),
+            Some(m) => (m.title.clone(), m.artist.clone()),
+            None => Default::default(),
         };
-        let w = ITEMS_END - TIMER_W.max(BARS_W) - GAP - TEXT_X;
-        self.painter.draw(&self.title_surface, |c| pages::two_lines(c, title, detail, TEXT, w, COMPACT.1))?;
-        self.scroll_title(title, detail, w)?;
+        self.draw_music_line()?;
         self.draw_times(media, now_ms)?;
         let enabled = |f: fn(&Media) -> bool| media.is_some_and(f);
         let glyphs = [
@@ -1235,7 +1297,11 @@ impl Island {
     /// window calls it ten times a second while the bars may move. Bars rise at once and fall
     /// back slower, like a level meter.
     pub fn show_level(&mut self, peak: f32) -> Result<()> {
-        self.loud = loudness(peak).max(self.loud * 0.7);
+        let db = decibels(peak);
+        // The loudest of late sets the scale, so a quiet stream moves the bars as much as loud
+        // music; it sinks half a decibel a second, never under -45 dB.
+        self.ceiling = db.max(self.ceiling - 0.05).max(-45.0);
+        self.loud = loudness(db, self.ceiling).max(self.loud * 0.7);
         self.level_step += 1;
         for (i, bar) in self.bars.iter().enumerate() {
             bar.SetScale(Vector3 { X: 1.0, Y: bar_level(self.loud, i, self.level_step), Z: 1.0 })?;
@@ -1257,6 +1323,7 @@ impl Island {
             } else {
                 self.stop_marquee()?;
             }
+            self.place_headset()?;
         }
         let glowing = glow && line == Line::Music;
         if glowing != self.glowing {
@@ -1288,6 +1355,16 @@ impl Island {
             bar.StartAnimation(h!("Scale.Y"), &wave)?;
         }
         Ok(())
+    }
+
+    /// The headset battery slides to where the line wants it.
+    fn place_headset(&self) -> Result<()> {
+        let x = if self.line == Line::Music { COMPACT.0 - EDGE - pages::HEADSET_W } else { IDLE - BUBBLE - pages::HEADSET_W + 2.0 };
+        let to = self.painter.px((x, 0.0));
+        let slide = self.compositor.CreateVector3KeyFrameAnimation()?;
+        slide.InsertKeyFrameWithEasingFunction(1.0, Vector3 { X: to.X.round(), Y: 0.0, Z: 0.0 }, &self.easing)?;
+        slide.SetDuration(ms(300))?;
+        self.headset.StartAnimation(h!("Offset"), &slide)
     }
 
     /// The shelf page with `shelf`, the list picked by `list` (0 files, 1 screenshots);
@@ -1650,9 +1727,14 @@ fn bar_height(bar: usize, step: usize) -> f32 {
     0.625 + 0.2 * (speed * t + phase).sin() + 0.075 * (7.0 * t + phase * 2.0).sin()
 }
 
-/// How loud a peak level (0..1, linear) sounds, 0..1: -42 dB is silence, 0 dB the loudest.
-fn loudness(peak: f32) -> f32 {
-    ((20.0 * peak.max(1e-5).log10() + 42.0) / 42.0).clamp(0.0, 1.0)
+/// A peak level (0..1, linear) in decibels, -100 for silence.
+fn decibels(peak: f32) -> f32 {
+    20.0 * peak.max(1e-5).log10()
+}
+
+/// How loud `db` is under `ceiling`, the loudest of late: 0..1 over the 30 dB below it.
+fn loudness(db: f32, ceiling: f32) -> f32 {
+    ((db - ceiling + 30.0) / 30.0).clamp(0.0, 1.0)
 }
 
 /// A bar's height (of BAR_H) at `loud`ness: from the paused height up, each bar a little apart
@@ -1771,9 +1853,11 @@ mod tests {
 
     #[test]
     fn bars_follow_the_level() {
-        assert_eq!(loudness(0.0), 0.0);
-        assert!((loudness(1.0) - 1.0).abs() < 1e-6);
-        assert!(loudness(0.5) > loudness(0.1) && loudness(0.1) > 0.0);
+        assert_eq!(loudness(decibels(0.0), -45.0), 0.0); // silence
+        assert!((loudness(decibels(1.0), 0.0) - 1.0).abs() < 1e-6);
+        assert!(loudness(-10.0, 0.0) > loudness(-20.0, 0.0) && loudness(-20.0, 0.0) > 0.0);
+        // A quiet stream under its own ceiling moves the bars as much as loud music.
+        assert_eq!(loudness(-40.0, -36.0), loudness(-4.0, 0.0));
         for bar in 0..BARS {
             for step in 0..EQ_STEPS {
                 assert!((PAUSED_BAR..=1.0).contains(&bar_level(1.0, bar, step)), "bar {bar} step {step}");
@@ -1784,11 +1868,17 @@ mod tests {
 
     #[test]
     fn closed_pill_leaves_room_for_text() {
-        // The music line's text next to the equalizer.
-        assert!(ITEMS_END - TIMER_W.max(BARS_W) - GAP - TEXT_X >= 150.0, "text squeezed by the equalizer or a timer");
+        for headset in [false, true] {
+            // The music line's text next to the equalizer or a timer, with the headset shown or not.
+            assert!(items_end(headset) - TIMER_W.max(BARS_W) - GAP - TEXT_X >= 150.0, "headset {headset}: text squeezed");
+        }
         // The grown bubble's words fit beside its mark.
         assert!(BUBBLE_NEWS - BUBBLE - 12.0 >= 140.0);
         // The clock has room for the time and a long day ("30 Ağustos Cumartesi").
         assert!(CLOCK.0 >= 120.0, "clock squeezed");
+        // The empty pill holds the headset with room around it.
+        assert!(IDLE >= pages::HEADSET_W + 2.0 * COMPACT.1);
+        // The headset sits between the line's items and the pill's rounded end.
+        assert!(items_end(true) + 8.0 + pages::HEADSET_W <= COMPACT.0 - EDGE + 0.01);
     }
 }

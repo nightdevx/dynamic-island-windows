@@ -6,6 +6,7 @@ use windows::core::Result;
 use crate::{
     claude::{Limits, Session, State, Window},
     shelf::{Shelf, VISIBLE},
+    headset::Battery,
     media::{Art, Media},
     render::{Align, Canvas},
     text::tr,
@@ -202,6 +203,28 @@ pub fn shelf_page(c: &Canvas, shelf: &Shelf, list: usize, counts: [usize; 2], dr
     c.text(&status, (18.0, SHELF_CLEAR.1, 268.0, SHELF_CLEAR.3), 11.0, false, 0xFF636366, Align::Left)?;
     c.text(if selected == total { tr("Seçimi kaldır", "Deselect all") } else { tr("Tümünü seç", "Select all") }, SELECT_ALL, 11.5, true, DIM, Align::Right)?;
     c.text(if selected > 0 { tr("Kaldır", "Remove") } else { tr("Temizle", "Clear") }, SHELF_CLEAR, 11.5, true, DIM, Align::Right)
+}
+
+pub const LOW_BATTERY: u32 = 20;
+pub const RED: u32 = 0xFFFF453A;
+pub const GREEN: u32 = 0xFF30D158;
+
+/// Width `headset` takes.
+pub const HEADSET_W: f32 = 46.0;
+
+/// Headset battery in a line `h` high from `(x, y)`: headphones (with a bolt on them while
+/// charging) and the percent. Green while charging, red when low.
+pub fn headset(c: &Canvas, (x, y, h): (f32, f32, f32), battery: Battery) -> Result<()> {
+    let color = match battery {
+        Battery { charging: true, .. } => GREEN,
+        Battery { percent, .. } if (percent as u32) < LOW_BATTERY => RED,
+        _ => DIM,
+    };
+    c.icon('\u{E7F6}', (x, y, 16.0, h), 13.0, color)?; // Headphone
+    if battery.charging {
+        c.icon('\u{E945}', (x + 9.0, y - 6.0, 10.0, h), 8.0, color)?; // LightningBolt, on the earcup
+    }
+    c.text(&tr(format!("%{}", battery.percent), format!("{}%", battery.percent)), (x + 18.0, y, HEADSET_W - 18.0, h), 11.0, true, color, Align::Left)
 }
 
 /// Two lines in a closed pill or the bubble: a bold title in `color` and a dim line under it,

@@ -41,6 +41,7 @@
 - **Saat:** çalan ya da duraklatılmış şarkı yokken kapalı island saati ve günü gösterir.
 - **Zamanlayıcı:** Sayaç sekmesi seçtiğiniz dakikadan geri sayar (1-45, fare tekerleğiyle istediğiniz kadar). Çalışırken kapalı island kalan süreyi gösterir; süre dolunca alarm çalar ve island bunu söyler.
 - **Bluetooth kulaklık:** ses bir Bluetooth kulaklığa geçince adı ve Windows biliyorsa pili bir kartla görünür.
+- **Razer Barracuda X pili** (Barracuda sürümü): 2022 model kulaklığın pili, 2.4 GHz alıcısı üzerinden kapalı island'da ve sekme çubuğunda; şarja takılınca ve pil azalınca kısa bir önizleme. Alıcının iki sürümü de çalışır (USB 1532:0550 ve 1532:0552), BarracudaBattery uygulamasıyla birlikte de.
 - **Yolunuza çıkmaz:** tam ekran uygulamalarda ve oyunlarda kendiliğinden gizlenir, diğer zamanlarda pencerelerin üstünde kalır.
 - **Ayarlar penceresi:** her seçenek tek yerde; Windows'a göre açık ya da koyu, Türkçe ya da İngilizce.
 
@@ -57,7 +58,7 @@ Island, çalışma zamanı ya da tarayıcı motoru olmayan, Rust ile yazılmış
 
 ## Kurulum
 
-[Releases](https://github.com/nightdevx/dynamic-island-windows/releases/latest) sayfasından `DynamicIsland-Setup-<sürüm>.exe` dosyasını indirip çalıştırın. Yönetici izni gerekmez; yalnızca sizin kullanıcınıza kurulur. Kurulumda şunları seçebilirsiniz:
+[Releases](https://github.com/nightdevx/dynamic-island-windows/releases/latest) sayfasından `DynamicIsland-Setup-<sürüm>.exe` dosyasını indirip çalıştırın. Razer Barracuda X (2022) kulaklığınız 2.4 GHz alıcısıyla bağlıysa onun yerine `DynamicIsland-Barracuda-Setup-<sürüm>.exe` dosyasını alın: aynı island, üstüne kulaklığın pili. İkisi birbirinin üzerine kurulur. Yönetici izni gerekmez; yalnızca sizin kullanıcınıza kurulur. Kurulumda şunları seçebilirsiniz:
 
 - **Windows açılınca başlat**
 - **Claude Code'a bağla** (Claude Code kuruluysa görünür): Claude sekmesinin oturumlarınızı görmesi için island'ın hook'larını `~/.claude/settings.json` dosyasına ekler. Dosyadaki diğer her şey olduğu gibi kalır, ilk seferde yanına bir yedek alınır. Kaldırınca hook'lar da silinir.
@@ -134,8 +135,9 @@ Rust (stable, MSVC) ve kurulum programı için [Inno Setup 6](https://jrsoftware
 
 ```powershell
 cargo build --release                      # island.exe
+cargo build --release --features headset   # Barracuda sürümü
 cargo test
-powershell -File scripts\package.ps1       # kurulum programı: dist\DynamicIsland-Setup-<sürüm>.exe
+powershell -File scripts\package.ps1       # iki kurulum programı: dist\DynamicIsland-Setup-<sürüm>.exe, dist\DynamicIsland-Barracuda-Setup-<sürüm>.exe
 powershell -File scripts\make-icon.ps1     # assets\island.ico'yu yeniden çizer
 ```
 

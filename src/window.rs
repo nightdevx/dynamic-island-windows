@@ -30,9 +30,11 @@ use crate::{
     claude::{self, Limits, Session, State},
     fullscreen,
     island::{self, Hit, Island, Line, Tab, View, TOP},
+    headset::{self, Battery, HeadsetLink},
     liked, log,
     media::{Command, Media, MediaLink},
     notices,
+    pages::{GREEN, RED},
     preferences::{self, Preferences},
     settings::{self, Settings},
     shelf::{self, DropTarget, Shelf},
@@ -60,6 +62,8 @@ const WM_NOTICE: u32 = WM_APP + 11; // a new Windows notification to preview
 const WM_BLUETOOTH: u32 = WM_APP + 12; // LPARAM: a Box<bluetooth::Device> the sound now goes to
 const NOTICE_MS: u32 = 4000;
 const SHELF_COPYDATA: usize = 0x5348_454C; // "SHEL": WM_COPYDATA from `island.exe --shelf`
+const WM_HEADSET: u32 = WM_APP + 9;
+const DBT_DEVNODES_CHANGED: usize = 0x0007; // a device was added or removed (any top-level window gets it)
 const VOLUME_MS: u32 = 1500;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1; // NINF_KEY
 // All timers are one-shot: the window procedure kills each one when it fires.
@@ -127,6 +131,8 @@ struct App {
     dropping: bool,      // files are being dragged over the island
     shots_since: std::time::SystemTime, // the island's start: only screenshots after it show
     shots_seen: HashSet<std::path::PathBuf>, // screenshots already shown once, kept or not
+    headset: Option<HeadsetLink>,
+    battery: Option<Battery>, // the headset's, as shown
     liked: Vec<liked::Song>,                 // newest first
     preferences: Option<Preferences>,        // the settings window, while open
     region: RECT,                            // the clickable part of the window, as last set
@@ -189,6 +195,8 @@ pub fn run() -> Result<()> {
         dropping: false,
         shots_since: std::time::SystemTime::now(),
         shots_seen: HashSet::new(),
+        headset: Some(HeadsetLink::start(hwnd, WM_HEADSET)),
+        battery: None,
         liked: liked::load(),
         preferences: None,
         region: RECT::default(),
@@ -342,6 +350,7 @@ impl App {
             self.island = Some(Island::new(self.hwnd, scale, WM_DEVICE_LOST)?);
             if let Some(island) = self.island.as_mut() {
                 let media = self.now_playing.as_ref();
+                island.set_headset(self.battery)?;
                 island.set_media(media, claude::now_ms())?;
                 island.set_art(media.and_then(|m| m.art.as_deref()), false)?;
             }
@@ -735,6 +744,19 @@ impl App {
                 SetTimer(Some(self.hwnd), PEEK_TIMER, ms, None);
             },
             Err(e) => log(format!("peek failed: {e}")),
+        }
+    }
+
+    /// The headset battery changed: the tab bar shows it; plugging in and running low peek.
+    fn headset_changed(&mut self) {
+        let new = self.headset.as_ref().and_then(HeadsetLink::current);
+        let old = std::mem::replace(&mut self.battery, new);
+        if let Some(Err(e)) = self.island.as_mut().map(|island| island.set_headset(new)) {
+            log(format!("headset draw failed: {e}"));
+        }
+        if let Some((text, charging)) = new.and_then(|now| headset::news(old, now)) {
+            let color = if charging { GREEN } else { RED };
+            self.peek(Tab::Music, PEEK_MS, |island| island.draw_peek(&text, Some(color)));
         }
     }
 
@@ -1349,6 +1371,13 @@ impl App {
                 return Ok(Some(LRESULT(1)));
             }
             WM_MEDIA => self.media_changed(),
+            WM_HEADSET => self.headset_changed(),
+            WM_DEVICECHANGE if wparam.0 == DBT_DEVNODES_CHANGED => {
+                if let Some(headset) = &self.headset {
+                    headset.rescan();
+                }
+                return Ok(None);
+            }
             WM_VOLUME => self.show_volume(wparam.0 as u32, lparam.0 != 0),
             WM_DRAG_FILES => self.files_dragged(wparam.0),
             WM_NOTICE => {
